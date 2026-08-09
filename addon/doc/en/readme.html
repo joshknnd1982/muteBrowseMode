@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mute Browse Mode</title>
+</head>
+<body>
+<h1>Mute Browse Mode</h1>
+
+<p>NVDA normally announces a browse mode document every time one is entered: the
+document name, the word "document", and the first line of the buffer. That happens
+when a web page finishes loading in Chrome, when you switch to a browser window, and
+when you open a message in any version of Microsoft Outlook.</p>
+
+<p>This add-on adds a <strong>Mute browse mode</strong> combo box to NVDA's Speech
+settings (NVDA menu, Preferences, Settings, Speech) with three choices.</p>
+
+<h2>Silence all browsing</h2>
+<p>NVDA stays silent while a document is loading and when it has finished loading.
+"Loading document..." is not spoken either. Reading the page yourself with the arrow
+keys, quick navigation keys and everything else works exactly as usual.</p>
+
+<h2>Play tones</h2>
+<p>Speech is silenced the same way, but three quick ascending tones are played when
+the document is ready, so you still know when you can start reading.</p>
+
+<h2>Normal</h2>
+<p>NVDA behaves exactly as if the add-on were not installed. This is the default.</p>
+
+<h2>Notes</h2>
+<ul>
+<li>Pressing any key immediately restores normal speech, so the add-on can never
+leave NVDA quiet when you are trying to work.</li>
+<li>Braille is untouched: the document and the current line are still brailled.</li>
+<li>Say all is never silenced. If you use Browse Mode settings, "Automatically say
+all on page load", NVDA will still read the page to you after it loads. Turn that
+setting off if you want the silence.</li>
+<li>If Browse Mode settings, "Audio indication of focus and browse modes" is on, you
+will still hear that short sound when a document is entered, because it is a sound
+rather than speech. Turn it off and NVDA speaks "browse mode" instead, which this
+add-on does silence.</li>
+<li>A command to cycle between the three choices is available in the Input Gestures
+dialog under "Mute Browse Mode". It has no gesture assigned by default.</li>
+</ul>
+
+</body>
+</html>
