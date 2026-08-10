@@ -377,6 +377,9 @@ _ANNOUNCE_CEILING = 8.0
 #: How long after a foreground change we wait to see whether NVDA is going to say
 #: anything at all before giving up on the announcement, in milliseconds.
 _ANNOUNCE_SETTLE = 300
+#: How long after the last utterance has been spoken the announcement stays open, in
+#: milliseconds, in case NVDA has more of it still to come.
+_ANNOUNCE_TAIL = 250
 
 #: Monotonic timestamp at which speech is allowed through again. 0 means open.
 _gateUntil = 0.0
@@ -398,6 +401,10 @@ _bypassDepth = 0
 #: deadline gate stands down, so alt+tab is never cut off.
 _announceUntil = 0.0
 _announcePending = 0
+#: Which announcement those two belong to. Bumped on every window switch, so that a
+#: callback for an utterance of the window just left cannot be counted against the
+#: window just arrived in.
+_announceGeneration = 0
 
 
 def _openGate(seconds):
@@ -520,6 +527,14 @@ def _isGated():
 # speaking. "Finished" is the synthesiser's word, not a guess: a CallbackCommand is
 # appended to each utterance we let through, and NVDA runs it when speech actually
 # reaches that point.
+#
+# Each announcement is numbered, and every callback carries the number of the
+# announcement it was made for. It has to: NVDA hands those callbacks back through the
+# event queue (``_onSynthIndexReached`` queues ``_handleIndex``), so one belonging to
+# the window the user has just left can easily arrive after the next switch has begun.
+# An unnumbered callback would then count against the new announcement and end it
+# early, which is exactly how the title of the window being switched to ended up only
+# half read.
 
 
 def _announcingNow():
@@ -528,34 +543,41 @@ def _announcingNow():
 
 def _beginAnnouncement():
 	"""A new window has come to the front, so stop silencing until it has been read."""
-	global _announceUntil, _announcePending
+	global _announceUntil, _announcePending, _announceGeneration
+	_announceGeneration += 1
 	_announcePending = 0
 	_announceUntil = time.monotonic() + _ANNOUNCE_CEILING
-	core.callLater(_ANNOUNCE_SETTLE, _endAnnouncementIfSilent, _announceUntil)
+	core.callLater(_ANNOUNCE_SETTLE, _endAnnouncementIfIdle, _announceGeneration)
 
 
 def _endAnnouncement():
-	global _announceUntil, _announcePending
+	global _announceUntil, _announcePending, _announceGeneration
 	_announceUntil = 0.0
 	_announcePending = 0
+	# Anything still in flight belonged to the announcement that has just ended.
+	_announceGeneration += 1
 
 
-def _endAnnouncementIfSilent(startedAt):
-	"""Nothing was queued in the moment after the switch, so there is nothing to wait for.
-
-	Keyed to the announcement it was scheduled for, so a second window switch inside
-	the settle time cannot be cut short by the first one's timer.
-	"""
-	if startedAt == _announceUntil and _announcePending <= 0:
+def _endAnnouncementIfIdle(generation):
+	"""End the announcement, unless it is still being spoken or has been replaced."""
+	if generation == _announceGeneration and _announcePending <= 0:
 		_endAnnouncement()
 
 
-def _announcementSpoken():
-	"""The synthesiser has reached the end of one utterance of the announcement."""
+def _announcementSpoken(generation):
+	"""The synthesiser has reached the end of one utterance of the announcement.
+
+	Waits a moment before ending, rather than ending on the spot, so that an
+	announcement NVDA is still adding to is not closed off in a gap between two of its
+	own utterances.
+	"""
 	global _announcePending
+	if generation != _announceGeneration:
+		# Left over from a window the user has already switched away from.
+		return
 	_announcePending -= 1
 	if _announcePending <= 0:
-		_endAnnouncement()
+		core.callLater(_ANNOUNCE_TAIL, _endAnnouncementIfIdle, generation)
 
 
 def _tagAnnouncement(args, kwargs):
@@ -576,7 +598,13 @@ def _tagAnnouncement(args, kwargs):
 		return args, kwargs
 	if not isinstance(sequence, list) or not sequence:
 		return args, kwargs
-	tagged = sequence + [_CallbackCommand(_announcementSpoken, name="muteBrowseMode.announced")]
+	generation = _announceGeneration
+	tagged = sequence + [
+		_CallbackCommand(
+			lambda: _announcementSpoken(generation),
+			name="muteBrowseMode.announced",
+		),
+	]
 	_announcePending += 1
 	if args:
 		return (tagged,) + tuple(args[1:]), kwargs
@@ -915,6 +943,64 @@ def _speakBriefFocus(sequence):
 	"""Say where the user has landed, past the add-on's own gate."""
 	with _ownSpeech():
 		speech.speak(sequence)
+
+
+### The Outlook message body
+
+#: Window classes Outlook renders a message body into: the Word editor it composes
+#: rich text in, the HTML control, and the plain text one.
+_OUTLOOK_BODY_WINDOW_CLASSES = frozenset((
+	"_WwG",
+	"_WwB",
+	"Internet Explorer_Server",
+	"RichEdit20W",
+	"RICHEDIT50W",
+))
+
+#: Roles a message body can have. Everything else the user tabs through on the way to
+#: it, To, Cc, Subject and the toolbars, has some other role or is a single line.
+_BODY_ROLES = _members(controlTypes.Role, ("DOCUMENT", "EDITABLETEXT"))
+
+_STATE_READONLY = getattr(controlTypes.State, "READONLY", None)
+_STATE_UNAVAILABLE = getattr(controlTypes.State, "UNAVAILABLE", None)
+_STATE_MULTILINE = getattr(controlTypes.State, "MULTILINE", None)
+_ROLE_DOCUMENT = getattr(controlTypes.Role, "DOCUMENT", None)
+
+
+def _isOutlookMessageBody(obj):
+	"""Whether the focus has landed in an Outlook message body that can be typed into.
+
+	The address and subject fields are editable text too, so a plain "is this editable"
+	test is not enough to tell them apart. What separates the body from them is that it
+	takes more than one line, or that it is a whole document rather than a field, or
+	that it is one of the windows Outlook only ever puts a message body in. A body the
+	user cannot type into, such as the one in the reading pane, is not announced,
+	because the announcement invites them to type.
+	"""
+	if not _isOutlook(obj):
+		return False
+	role = getattr(obj, "role", None)
+	if role not in _BODY_ROLES:
+		return False
+	try:
+		states = set(obj.states or ())
+	except Exception:
+		states = set()
+	if _STATE_READONLY is not None and _STATE_READONLY in states:
+		return False
+	if _STATE_UNAVAILABLE is not None and _STATE_UNAVAILABLE in states:
+		return False
+	if _windowClassOf(obj) in _OUTLOOK_BODY_WINDOW_CLASSES:
+		return True
+	if role == _ROLE_DOCUMENT:
+		return True
+	return _STATE_MULTILINE is not None and _STATE_MULTILINE in states
+
+
+def _announceMessageBody():
+	# Translators: Announced when the focus reaches the message body in Microsoft Outlook.
+	with _ownSpeech():
+		ui.message(_("You are now in the message body, type a message."))
 
 
 ### Monkey patching
@@ -1273,6 +1359,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		#: Latest moment the focus landing in Outlook still counts as having just
 		#: arrived there. A deadline rather than a flag, so it cannot latch.
 		self._outlookArrivalUntil = 0.0
+		#: The window the message body announcement was last made for, so that tabbing
+		#: away and back announces it again but a repeated focus event does not.
+		self._lastBodyWindow = None
 
 		try:
 			# Gating speech itself, rather than each announcement, catches every route
@@ -1457,8 +1546,36 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 				with _hardMute():
 					nextHandler()
 				_speakBriefFocus(sequence)
+				self._reportMessageBody(obj)
 				return
 		nextHandler()
+		self._reportMessageBody(obj)
+
+	def _reportMessageBody(self, obj):
+		"""Say when the focus has reached an Outlook message body.
+
+		Tabbing through a new message goes To, Cc, Subject, body, and NVDA names the
+		first three but gives the body no name to read, so there is nothing to tell the
+		user they have arrived in the part they are meant to type into.
+
+		Said after NVDA's own announcement rather than before it, because the browse
+		mode document a message body can be will cancel speech on its way into focus
+		mode, and anything said first would be cut off by that.
+		"""
+		if getMode() == MODE_NORMAL:
+			return
+		try:
+			if not _isOutlookMessageBody(obj):
+				self._lastBodyWindow = None
+				return
+			window = getattr(obj, "windowHandle", None)
+			if window is not None and window == self._lastBodyWindow:
+				# The same body raising a second focus event, not a new arrival.
+				return
+			self._lastBodyWindow = window
+			_announceMessageBody()
+		except Exception:
+			log.error("Mute Browse Mode: could not announce the message body", exc_info=True)
 
 	def terminate(self):
 		_cancelSummary()

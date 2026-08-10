@@ -59,6 +59,16 @@ of the announcement, and NVDA runs it when speech actually reaches that point. P
 a key ends the wait early, and a ceiling of eight seconds ends it whatever happens, so
 a cancelled announcement can never leave the add-on switched off.
 
+Each announcement is numbered and every callback carries its number. It has to: NVDA
+hands those callbacks back through the event queue — `_onSynthIndexReached` queues
+`_handleIndex`, which runs the callback — so one belonging to the window you have just
+left routinely arrives *after* the switch to the next window has begun. Counting it
+against the new announcement drove the pending count negative, ended the announcement
+on the spot, and let the deadline gate eat the rest of the new window's title. That is
+why switching out of Outlook, the one place the add-on speaks an utterance of its own,
+was where the half-read title showed up. An announcement also stays open for 250 ms
+after its last utterance, so a gap between two parts of one cannot close it either.
+
 ## Switching to Microsoft Outlook
 
 Arriving in Outlook from another program answers with a brief description of where you
@@ -71,6 +81,26 @@ is included. This **replaces** NVDA's own report rather than adding to it, so no
 is said twice: NVDA's report still runs, silently, so braille and NVDA's property
 caches are untouched. It only fires when Outlook was not already the foreground
 program, and only when the mute browse mode combo box is not on Normal.
+
+## The Outlook message body
+
+Tabbing through a new message goes To, Cc, Subject, body. NVDA names the first three,
+but the body has no name to read, so nothing tells you that you have reached the part
+you type into. When the focus lands there NVDA now says:
+
+> You are now in the message body, type a message.
+
+Said after NVDA's own announcement of the field, not before — a message body that is a
+browse mode document calls `speech.cancelSpeech()` on its way into focus mode, so
+anything said first would be cut off by it.
+
+Only for a body you can type into. The address and subject fields are editable text
+too, so the test is not "is this editable": the body is the one that takes more than
+one line, or is a whole document rather than a field, or lives in a window Outlook only
+ever puts a message body in (`_WwG`, `Internet Explorer_Server`, `RichEdit20W`). A
+read-only body, such as the reading pane, is left alone, because the announcement
+invites you to type. Tabbing away and back says it again; the same body raising a
+second focus event does not.
 
 ## Where the summary happens
 
@@ -140,7 +170,7 @@ NVDA+t for the title, NVDA+tab for the focus and NVDA+b for a whole dialog all u
 python build.py
 ```
 
-That writes `muteBrowseMode-1.4.nvda-addon` next to `build.py`. Open it to install,
+That writes `muteBrowseMode-1.5.nvda-addon` next to `build.py`. Open it to install,
 or drag it onto NVDA.
 
 ## How it works

@@ -71,8 +71,11 @@ point of the add-on.</p>
 
 <p>"Read right to the end" is the synthesiser's word for it, not a guess at how long a
 title takes: the add-on asks NVDA to tell it when speech has actually reached the end
-of the announcement. Pressing a key ends the wait early, because you have stopped
-listening and started working.</p>
+of the announcement. This holds however fast you cycle through windows, including
+holding alt down and pressing tab several times: what NVDA was saying about a window
+you have already left can never end the announcement of the one you have arrived in.
+Pressing a key ends the wait early, because you have stopped listening and started
+working.</p>
 
 <h2>Switching to Microsoft Outlook</h2>
 
@@ -91,6 +94,24 @@ a combo box, the selected item is included too.</p>
 twice. NVDA still does everything else it would have done, so braille and NVDA's own
 caches are exactly as they always were. It only happens when Outlook was not already
 the program you were in, and only when the first combo box is not set to Normal.</p>
+
+<h2>The Outlook message body</h2>
+
+<p>Tabbing through a new message goes To, Cc, Subject, and then the body. NVDA names
+the first three, but the body has no name for it to read, so there is nothing to tell
+you that you have reached the part you are meant to type into. When the focus lands
+there, NVDA now says:</p>
+
+<blockquote>
+<p>You are now in the message body, type a message.</p>
+</blockquote>
+
+<p>It is said after NVDA's own announcement of the field, and only for a body you can
+actually type into: the read-only body in the reading pane is left alone, as are the
+address and subject fields, which are editable text as well but only take one line.
+Tabbing away and back says it again; a message body raising a second focus event on
+its own does not. Like the rest of the Outlook behaviour, it is quiet when the first
+combo box is set to Normal.</p>
 
 <h2>Where the summary happens, and where it does not</h2>
 
@@ -175,6 +196,21 @@ happens.</li>
 </ul>
 
 <h2>Changes</h2>
+
+<h3>1.5</h3>
+<ul>
+<li>Fixed the title of a window being only half read when you switch to it straight
+after leaving Microsoft Outlook. NVDA hands back "this has now been spoken" through its
+event queue, so one belonging to the window you have just left arrives after the switch
+to the next one has already begun. It was being counted against the new window's
+announcement and ending it early, which cut the title off. Each announcement is now
+numbered, and a message from a window you have left is ignored.</li>
+<li>An announcement also now stays open for a moment after the last thing NVDA said,
+rather than closing on the spot, so a gap between two parts of it cannot end it
+either.</li>
+<li>Tabbing into the body of a message in Outlook now says "You are now in the message
+body, type a message."</li>
+</ul>
 
 <h3>1.4</h3>
 <ul>
