@@ -37,6 +37,7 @@ speaks:</p>
 <li>window titles, so switching to Outlook no longer reads the title of the message
 list window, and opening a message no longer reads the title of the message
 window;</li>
+<li>dialogs, so opening an Outlook message no longer says the word "dialog";</li>
 <li>document titles, so a browser tab no longer announces the page title;</li>
 <li>toasts and notification balloons, such as a browser's download and pop-up
 messages;</li>
@@ -49,9 +50,9 @@ Vivaldi and forks of them, because the add-on recognises them by the windows Chr
 creates rather than by a list of program names. The new Outlook for Windows is
 recognised the same way, as it is built on the same engine.</p>
 
-<p>You can still ask for any of this at any time. NVDA+t reads the title, and NVDA+tab
-reads the focus, exactly as usual: only the announcements NVDA makes on its own
-initiative are dropped.</p>
+<p>You can still ask for any of this at any time. NVDA+t reads the title, NVDA+tab reads
+the focus, and NVDA+b reads a whole dialog, exactly as usual: only the announcements
+NVDA makes on its own initiative are dropped.</p>
 
 <h2>Notes</h2>
 <ul>
@@ -73,6 +74,17 @@ dialog under "Mute Browse Mode". It has no gesture assigned by default.</li>
 </ul>
 
 <h2>Changes</h2>
+
+<h3>1.2</h3>
+<ul>
+<li>Opening an Outlook message no longer says the word "dialog". An Outlook message
+opens inside a dialog, and NVDA announces that dialog on its way down to the focus,
+before the message document exists at all, so none of the browse mode silencing could
+reach it.</li>
+<li>Because of this, dialogs are no longer announced by NVDA on its own initiative in
+Outlook or in Chromium based browsers. NVDA+b still reads the whole dialog whenever you
+ask for it.</li>
+</ul>
 
 <h3>1.1</h3>
 <ul>

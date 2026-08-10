@@ -34,6 +34,9 @@ Outlook or in Chromium based browsers. There, NVDA also stops speaking:
 
 - **window titles**, so switching to Outlook no longer reads the title of the message
   list window and opening a message no longer reads the title of the message window;
+- **dialogs**, so opening an Outlook message no longer says the word "dialog". A
+  message opens inside a dialog, and NVDA announces it while walking down the focus
+  ancestors, which happens before the message document exists;
 - **document titles**, so a browser tab no longer announces the page title;
 - **toasts and notification balloons**, such as a browser's download and pop-up
   messages;
@@ -47,8 +50,8 @@ covered without the add-on needing to know about them, as is the new Outlook for
 Windows, which is a WebView2 application.
 
 Only announcements NVDA volunteers are dropped. Anything you ask for still answers:
-NVDA+t for the title and NVDA+tab for the focus both use `OutputReason.QUERY`, which
-is never suppressed.
+NVDA+t for the title, NVDA+tab for the focus and NVDA+b for a whole dialog all use
+`OutputReason.QUERY`, which is never suppressed.
 
 ## Building
 
@@ -56,7 +59,7 @@ is never suppressed.
 python build.py
 ```
 
-That writes `muteBrowseMode-1.1.nvda-addon` next to `build.py`. Open it to install,
+That writes `muteBrowseMode-1.2.nvda-addon` next to `build.py`. Open it to install,
 or drag it onto NVDA.
 
 ## How it works
@@ -85,11 +88,18 @@ Gating `speak` rather than each individual announcement means every route into t
 synthesiser is covered: `speakTextInfo`, `speakObject`, `speakMessage` and
 `ui.message` all funnel through it.
 
-On top of the gate, `speech.speakObject` drops window, pane, frame, document,
+On top of the gate, `speech.speakObject` drops window, pane, frame, dialog, document,
 application and alert roles in Outlook and Chromium windows, and
 `NVDAObject.event_liveRegionChange`, `behaviors.Notification.event_alert` /
 `event_show` and `IAccessible.event_alert` are silenced there. Those calls still run,
 so braille and NVDA's caches are unaffected — only the speech is dropped.
+
+The dialog is dropped by role rather than gated because there is nothing to gate it
+with yet. `eventHandler.doPreGainFocus` fires `focusEntered` for every new focus
+ancestor — which is where `NVDAObject.event_focusEntered` calls
+`speakObject(reason=FOCUSENTERED)` on the dialog an Outlook message opens in — and only
+then reaches `event_treeInterceptor_gainFocus`. The word "dialog" is therefore spoken
+before the browse mode document exists at all.
 `OutputReason.ONLYCACHE` is never suppressed, because browse mode relies on it to keep
 its property cache honest.
 

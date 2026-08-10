@@ -18,8 +18,11 @@ That last one is what reads the first line of an Outlook message, and because it
 focus event rather than a load, hooking the load is not enough to stop it.
 
 In Outlook and in Chromium based browsers the add-on goes further and never speaks
-window or document titles, toasts, or live region "flash" messages, because in those
-two applications they are noise rather than information.
+window, dialog or document titles, toasts, or live region "flash" messages, because in
+those two applications they are noise rather than information. The dialog is part of
+this: an Outlook message opens inside one, and NVDA names it, and says the word
+"dialog", on its way down to the focus. That happens before the document exists, so it
+is dropped by role rather than gated.
 
 The gate is deadline based rather than a counter, so a bug or an exception can never
 leave NVDA permanently mute: the worst case is a few seconds of silence that expires
@@ -184,12 +187,29 @@ def _members(enum, names):
 	return frozenset(m for m in (getattr(enum, name, None) for name in names) if m is not None)
 
 
-#: Roles whose name is really just a window or document title. NVDA speaks these when a
-#: window comes to the foreground and as it walks down the focus ancestors, which is
-#: where the Outlook message list window title and the message window title come from.
+#: Roles that are really just a container: a window, a dialog or a document, whose name
+#: is its title. NVDA speaks these when a window comes to the foreground and as it walks
+#: down the focus ancestors, which is where the Outlook message list window title, the
+#: message window title, and the bare word "dialog" an opening message announces all
+#: come from.
+#:
+#: DIALOG matters as much as WINDOW here. An Outlook message opens inside a dialog, and
+#: NVDA announces it from ``NVDAObject.event_focusEntered`` while walking down to the
+#: focus. That walk finishes before ``event_treeInterceptor_gainFocus`` runs, so it
+#: happens before any of the browse mode hooks below have opened the gate, and dropping
+#: the announcement here is the only thing that catches it.
 _TITLE_ROLES = _members(
 	controlTypes.Role,
-	("WINDOW", "PANE", "FRAME", "INTERNALFRAME", "DOCUMENT", "APPLICATION", "PROPERTYPAGE"),
+	(
+		"WINDOW",
+		"PANE",
+		"FRAME",
+		"INTERNALFRAME",
+		"DIALOG",
+		"DOCUMENT",
+		"APPLICATION",
+		"PROPERTYPAGE",
+	),
 )
 
 #: Roles used for toasts, flash messages and other transient announcements.
@@ -431,7 +451,7 @@ def _isEnteringDocument(self, args, kwargs):
 
 
 def _shouldDropObjectSpeech(args, kwargs):
-	"""True for the window titles, document titles and toasts we never want spoken.
+	"""True for the window, dialog and document titles and toasts we never want spoken.
 
 	Only applies inside Outlook and Chromium based browsers, and only to announcements
 	NVDA made on its own initiative.
