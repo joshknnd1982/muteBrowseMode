@@ -1,7 +1,8 @@
 # Mute Browse Mode
 
 An NVDA add-on for NVDA 2026.1 that stops NVDA announcing a browse mode document
-every time one loads or is entered.
+every time one loads or is entered, and replaces that announcement in a web browser
+with a short summary of the page.
 
 NVDA normally speaks the document name, the word "document" and the first line of
 the buffer whenever a web page finishes loading in Chrome, whenever you switch to a
@@ -13,10 +14,12 @@ This add-on lets you silence that.
 Grab the latest `.nvda-addon` file from the
 [Releases](../../releases/latest) page. Open it to install, then restart NVDA.
 
-## The setting
+## The settings
 
-A **Mute browse mode** combo box is added to NVDA's Speech settings
-(NVDA menu → Preferences → Settings → Speech), with three choices:
+Two combo boxes are added to NVDA's Browse Mode settings
+(NVDA menu → Preferences → Settings → Browse Mode).
+
+### Mute browse mode
 
 | Choice | Behaviour |
 | --- | --- |
@@ -24,8 +27,55 @@ A **Mute browse mode** combo box is added to NVDA's Speech settings
 | Play tones | Speech is silenced the same way, and three quick ascending tones (A4, D5, G5) play when the document is ready. |
 | Normal | NVDA behaves exactly as if the add-on were not installed. This is the default. |
 
-There is also a "cycle mute browse mode" command in the Input Gestures dialog under
+### Announce a page summary when a page has loaded
+
+What happens in a web browser once a page has finished loading, in place of the
+announcement the combo box above silenced.
+
+| Choice | Behaviour |
+| --- | --- |
+| Speak the summary | NVDA says "Loading complete", then "Page has 8 regions, 57 headings and 196 links". This is the default. |
+| Play tones | The three ascending tones instead of the summary. If the combo box above is also set to tones, you still only hear them once. |
+| Normal | No summary. |
+
+Both combo boxes also have a cycle command in the Input Gestures dialog under
 "Mute Browse Mode", with no gesture assigned by default.
+
+## Where the summary happens
+
+Only when **Microsoft Outlook is not the program you are in**. That is confirmed
+silently on every single page load, from the foreground window and from the focus;
+nothing about the check is ever spoken. Outlook is the one application the add-on
+exists to keep quiet, so a message opening there stays as quiet as it was.
+
+It is announced in Chromium browsers (Chrome, Edge, Brave, Opera, Vivaldi and forks),
+in Gecko browsers (Firefox and forks) and in Electron applications. The new Outlook for
+Windows is a WebView2 application, so it looks exactly like Chromium from the outside;
+it is matched as Outlook first and stays silent.
+
+Regions are NVDA's landmarks, and all three counts come from the same
+`_iterNodesByType` search the Elements List uses. A page with a huge number of any one
+element is not counted all the way to the end — the count stops at 1500 or after 1.5
+seconds, whichever comes first, and the summary says "over 1500 links" — so that
+counting can never hold NVDA up.
+
+The summary is also skipped for a page that loaded in a background tab, for a page you
+started using before it finished loading (any keypress cancels it), and while say all
+is running.
+
+## Control+F in Outlook
+
+Control+F is handed straight to whichever program you are in and is never claimed by
+NVDA. In Outlook that forwards the message you are reading, which is what control+F
+means in Outlook. In a browser it opens the browser's find bar.
+
+NVDA's find stays on **NVDA+control+F**, which is where NVDA itself binds it, with
+NVDA+F3 and NVDA+shift+F3 for the next and previous match.
+
+The add-on binds control+F rather than leaving it unbound because a global plugin
+script is the first thing NVDA looks for, ahead of the browse mode document and
+anything else that might claim the key. The script does nothing but hand the keystroke
+on, and NVDA ignores the keys it injects itself, so it cannot come back round.
 
 ## In Outlook and Chromium browsers
 
@@ -59,7 +109,7 @@ NVDA+t for the title, NVDA+tab for the focus and NVDA+b for a whole dialog all u
 python build.py
 ```
 
-That writes `muteBrowseMode-1.2.nvda-addon` next to `build.py`. Open it to install,
+That writes `muteBrowseMode-1.3.nvda-addon` next to `build.py`. Open it to install,
 or drag it onto NVDA.
 
 ## How it works
@@ -82,11 +132,20 @@ NVDA does not read an Outlook message as part of a load.
 - `virtualBuffers.VirtualBuffer.loadBuffer` — the start of a load, which is what
   silences "Loading document...".
 - `virtualBuffers.VirtualBuffer._loadBufferDone` — the end of a load, which speaks
-  "Refreshed" on a reload, and the moment the chime belongs to.
+  "Refreshed" on a reload, and the moment the chime and the page summary belong to.
 
 Gating `speak` rather than each individual announcement means every route into the
 synthesiser is covered: `speakTextInfo`, `speakObject`, `speakMessage` and
 `ui.message` all funnel through it.
+
+The page summary rides on the same two load hooks, but outside the mute mode check, so
+that it has its own setting rather than being switched off by the other one.
+`loadBuffer` marks the buffer as owed a summary, `_loadBufferDone` schedules it 400 ms
+later — long enough for the tail of NVDA's own announcement, which is queued onto the
+main queue, to have come and gone — and it is spoken inside a bypass that lets the
+add-on's own speech past its own gate. A buffer that finishes loading empty is one NVDA
+is still waiting on, and it stays armed for `event_documentLoadComplete`, which is
+where NVDA reports such a document instead.
 
 On top of the gate, `speech.speakObject` drops window, pane, frame, dialog, document,
 application and alert roles in Outlook and Chromium windows, and
@@ -118,7 +177,8 @@ Braille is deliberately untouched.
   rather than speech. Turn it off and NVDA speaks "browse mode" instead, which this
   add-on does silence.
 - If Browse Mode settings → "Automatically say all on page load" is on, NVDA will
-  still read the page after it loads. Turn it off if you want the silence.
+  still read the page after it loads, and the page summary is skipped so it does not
+  talk over it. Turn it off if you want the silence.
 
 ## License
 

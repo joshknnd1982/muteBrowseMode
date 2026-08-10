@@ -24,6 +24,12 @@ this: an Outlook message opens inside one, and NVDA names it, and says the word
 "dialog", on its way down to the focus. That happens before the document exists, so it
 is dropped by role rather than gated.
 
+In a web browser, and only when Outlook is *not* the program the user is in, the
+silence is replaced by a page summary once the buffer has finished loading: "Loading
+complete", then how many regions, headings and links the page has. Outlook is the one
+place that must stay silent, so every page summary is gated on a check of the current
+application. That check is silent: its answer only ever reaches NVDA's log.
+
 The gate is deadline based rather than a counter, so a bug or an exception can never
 leave NVDA permanently mute: the worst case is a few seconds of silence that expires
 on its own. Any input gesture closes the gate immediately, so pressing a key always
@@ -35,6 +41,7 @@ braille, vision and NVDA's own caches carry on as usual.
 import time
 
 import addonHandler
+import api
 import browseMode
 import config
 import controlTypes
@@ -58,6 +65,12 @@ except Exception:
 	# gettext ``_`` into builtins anyway, so this is only belt and braces.
 	log.debugWarning("Mute Browse Mode: translations unavailable", exc_info=True)
 
+if "ngettext" not in globals():
+	# initTranslation puts ngettext in this module's globals. NVDA only installs ``_``
+	# into builtins, so if that call failed there would otherwise be no plural form.
+	def ngettext(singular, plural, n):
+		return singular if n == 1 else plural
+
 
 #: Section this add-on owns in nvda.ini.
 CONF_SECTION = "muteBrowseMode"
@@ -69,37 +82,69 @@ MODE_NORMAL = "normal"
 #: Order matters: this is the order of the entries in the combo box.
 MODES = (MODE_SILENCE, MODE_TONES, MODE_NORMAL)
 
+SUMMARY_SPEAK = "speak"
+SUMMARY_TONES = "tones"
+SUMMARY_NORMAL = "normal"
+
+#: Order matters: this is the order of the entries in the combo box.
+SUMMARY_MODES = (SUMMARY_SPEAK, SUMMARY_TONES, SUMMARY_NORMAL)
+
 config.conf.spec[CONF_SECTION] = {
 	"mode": 'option("silence", "tones", "normal", default="normal")',
+	"pageSummary": 'option("speak", "tones", "normal", default="speak")',
 }
 
 
 def getModeLabels():
 	"""Combo box entries, in the same order as L{MODES}."""
 	return [
-		# Translators: A choice in the "Mute browse mode" combo box in Speech settings.
+		# Translators: A choice in the "Mute browse mode" combo box in Browse Mode settings.
 		_("Silence all browsing"),
-		# Translators: A choice in the "Mute browse mode" combo box in Speech settings.
+		# Translators: A choice in the "Mute browse mode" combo box in Browse Mode settings.
 		_("Play tones"),
-		# Translators: A choice in the "Mute browse mode" combo box in Speech settings.
+		# Translators: A choice in the "Mute browse mode" combo box in Browse Mode settings.
 		_("Normal"),
 	]
 
 
-def getMode():
-	"""The configured mode, falling back to "normal" if the config is missing or odd."""
+def getSummaryModeLabels():
+	"""Combo box entries, in the same order as L{SUMMARY_MODES}."""
+	return [
+		# Translators: A choice in the "page summary" combo box in Browse Mode settings.
+		_("Speak the summary"),
+		# Translators: A choice in the "page summary" combo box in Browse Mode settings.
+		_("Play tones"),
+		# Translators: A choice in the "page summary" combo box in Browse Mode settings.
+		_("Normal"),
+	]
+
+
+def _getOption(key, valid, default):
+	"""One of this add-on's options, falling back if the config is missing or odd."""
 	try:
-		mode = config.conf[CONF_SECTION]["mode"]
+		value = config.conf[CONF_SECTION][key]
 	except Exception:
-		return MODE_NORMAL
-	return mode if mode in MODES else MODE_NORMAL
+		return default
+	return value if value in valid else default
+
+
+def getMode():
+	return _getOption("mode", MODES, MODE_NORMAL)
 
 
 def setMode(mode):
 	config.conf[CONF_SECTION]["mode"] = mode
 
 
-### The applications we are aggressive in
+def getSummaryMode():
+	return _getOption("pageSummary", SUMMARY_MODES, SUMMARY_SPEAK)
+
+
+def setSummaryMode(mode):
+	config.conf[CONF_SECTION]["pageSummary"] = mode
+
+
+### The applications we treat specially
 
 TARGET_OUTLOOK = "outlook"
 TARGET_CHROMIUM = "chromium"
@@ -145,10 +190,35 @@ _CHROMIUM_APP_NAMES = frozenset((
 #: window the page itself is rendered into. Matching on these rather than on a list of
 #: executables means new browsers and forks are covered without an add-on update, and
 #: it is also how the new Outlook is recognised, since that is a WebView2 application.
+#: Electron applications are covered by the same classes.
 _CHROMIUM_WINDOW_CLASSES = frozenset((
 	"Chrome_WidgetWin_0",
 	"Chrome_WidgetWin_1",
 	"Chrome_RenderWidgetHostHWND",
+))
+
+#: Executable names of Gecko based browsers. Firefox is not Chromium, so it is not one
+#: of the applications the add-on is aggressive in, but a page loading in it is still a
+#: page, and it still gets a page summary.
+_GECKO_APP_NAMES = frozenset((
+	"firefox",
+	"firefox-esr",
+	"waterfox",
+	"librewolf",
+	"floorp",
+	"zen",
+	"palemoon",
+	"basilisk",
+	"seamonkey",
+	"icecat",
+	"mercury",
+))
+
+#: Window classes every Gecko build uses.
+_GECKO_WINDOW_CLASSES = frozenset((
+	"MozillaWindowClass",
+	"MozillaDialogClass",
+	"MozillaContentWindowClass",
 ))
 
 
@@ -178,6 +248,49 @@ def _targetOf(obj):
 	if _windowClassOf(obj) in _CHROMIUM_WINDOW_CLASSES:
 		return TARGET_CHROMIUM
 	return None
+
+
+def _isOutlook(obj):
+	"""Whether C{obj} belongs to any version of Microsoft Outlook."""
+	return obj is not None and _appNameOf(obj) in _OUTLOOK_APP_NAMES
+
+
+def outlookIsCurrent(obj=None):
+	"""Whether Microsoft Outlook is the program the user is currently in.
+
+	Answered from the foreground window and the focus, so it is the running program
+	that decides, not the object that happened to raise an event. C{obj}, when given,
+	is checked first: a document belonging to Outlook counts as Outlook even in the
+	moment before its window has become the foreground one.
+
+	The answer is only ever written to NVDA's log. Nothing here reaches the
+	synthesiser, so the check itself is never heard.
+	"""
+	if _isOutlook(obj):
+		return True
+	for getter in (api.getForegroundObject, api.getFocusObject):
+		try:
+			candidate = getter()
+		except Exception:
+			continue
+		if _isOutlook(candidate):
+			return True
+	return False
+
+
+def _isWebBrowser(obj):
+	"""Whether C{obj} belongs to a browser or an Electron application, and not Outlook.
+
+	Outlook is excluded before anything else, because the new Outlook for Windows is a
+	WebView2 application and so looks exactly like Chromium from the outside.
+	"""
+	if obj is None or _isOutlook(obj):
+		return False
+	if _targetOf(obj) == TARGET_CHROMIUM:
+		return True
+	if _appNameOf(obj) in _GECKO_APP_NAMES:
+		return True
+	return _windowClassOf(obj) in _GECKO_WINDOW_CLASSES
 
 
 ### Roles and reasons
@@ -243,6 +356,9 @@ _gateUntil = 0.0
 #: may keep speech shut. Both have to agree, so even a lost decrement expires by itself.
 _muteDepth = 0
 _muteUntil = 0.0
+#: Depth of nested "this is the add-on speaking" wrappers. Speech from inside one of
+#: these is never gated: it is the add-on's own announcement, not NVDA's.
+_bypassDepth = 0
 
 
 def _openGate(seconds):
@@ -278,10 +394,29 @@ class _hardMute:
 		return False
 
 
+class _ownSpeech:
+	"""Context manager letting the add-on's own announcements past the gate.
+
+	The page summary is spoken in the moment the gate is holding NVDA's document
+	announcement shut, which is exactly the point: it is what replaces it.
+	"""
+
+	def __enter__(self):
+		global _bypassDepth
+		_bypassDepth += 1
+		return self
+
+	def __exit__(self, *exc):
+		global _bypassDepth
+		_bypassDepth = max(0, _bypassDepth - 1)
+		return False
+
+
 def _resetGates():
-	global _muteDepth, _muteUntil
+	global _muteDepth, _muteUntil, _bypassDepth
 	_muteDepth = 0
 	_muteUntil = 0.0
+	_bypassDepth = 0
 	_closeGate()
 
 
@@ -295,6 +430,8 @@ def _sayAllRunning():
 
 
 def _isGated():
+	if _bypassDepth > 0:
+		return False
 	now = time.monotonic()
 	if _muteDepth > 0 and now < _muteUntil:
 		return True
@@ -333,10 +470,203 @@ def _playReadyTones():
 		delay += ms + _TONE_GAP
 
 
+### The page summary
+
+#: Attribute set on a virtual buffer that has started loading and has not yet had its
+#: summary announced. Kept on the buffer rather than in a module level variable because
+#: several tabs and frames load at once and only the focused one is announced.
+_ARMED_ATTR = "_muteBrowseModeSummaryArmed"
+
+#: Node types counted, in the order they are announced.
+_SUMMARY_TYPES = ("landmark", "heading", "link")
+
+#: How long after the load finishes the summary is announced. NVDA queues the tail of
+#: its own document announcement onto the main queue, so this waits for that to have
+#: come and gone rather than talking over it.
+_SUMMARY_DELAY = 400
+#: Never count more than this many of any one element.
+_SUMMARY_MAX = 1500
+#: Wall clock budget for counting a whole page. Each element found is a separate call
+#: into the virtual buffer, so a pathological page must not be allowed to stall NVDA.
+_SUMMARY_BUDGET = 1.5
+#: How often, in elements, the budget is checked.
+_SUMMARY_BUDGET_EVERY = 50
+
+#: The pending wx.CallLater, so a second load can replace the first one's summary.
+_summaryTimer = None
+
+
+def _cancelSummary():
+	global _summaryTimer
+	timer, _summaryTimer = _summaryTimer, None
+	if timer is None:
+		return
+	try:
+		timer.Stop()
+	except Exception:
+		pass
+
+
+def _armSummary(buffer, args=None, kwargs=None):
+	"""A buffer has started loading, so it is owed one summary."""
+	try:
+		setattr(buffer, _ARMED_ATTR, True)
+	except Exception:
+		log.debugWarning("Mute Browse Mode: could not arm the page summary", exc_info=True)
+
+
+def _isFocusedBuffer(buffer):
+	"""Whether C{buffer} is the document the user is actually in.
+
+	The same check NVDA makes before reporting a document it has just loaded. Several
+	tabs load at once, and only the one being looked at has anything to say.
+	"""
+	try:
+		return api.getFocusObject().treeInterceptor is buffer
+	except Exception:
+		return False
+
+
+def _scheduleSummary(buffer, args=(), kwargs=None):
+	"""A buffer has finished loading, so queue its summary."""
+	global _summaryTimer
+	if getSummaryMode() == SUMMARY_NORMAL or not getattr(buffer, _ARMED_ATTR, False):
+		return
+	if not _isFocusedBuffer(buffer):
+		# A background tab. Checked here as well as when the summary comes round, so
+		# that one cannot take the pending slot away from the tab being looked at.
+		return
+	_cancelSummary()
+	_summaryTimer = core.callLater(_SUMMARY_DELAY, _announceSummary, buffer)
+
+
+def _bufferTextLength(buffer):
+	"""How many characters C{buffer} holds, or C{None} if that cannot be told.
+
+	A virtual buffer that finished loading empty is one NVDA is still waiting on: it
+	handles that by reporting the document again from ``event_documentLoadComplete``.
+	Counting an empty buffer would announce a page of nothing.
+	"""
+	try:
+		import NVDAHelper
+
+		handle = buffer.VBufHandle
+		if not handle:
+			return 0
+		return int(NVDAHelper.localLib.VBuf_getTextLength(handle))
+	except Exception:
+		return None
+
+
+def _countElements(buffer):
+	"""How many of each of L{_SUMMARY_TYPES} the buffer holds.
+
+	Returns a C{{nodeType: (count, capped)}} mapping, where C{capped} means the count
+	stopped early and is a floor rather than a total.
+	"""
+	deadline = time.monotonic() + _SUMMARY_BUDGET
+	counts = {}
+	for nodeType in _SUMMARY_TYPES:
+		count = 0
+		capped = False
+		try:
+			# Raised eagerly by NVDA when a backend cannot search for this node type,
+			# so it has to be caught around the call and not just around the loop.
+			nodes = buffer._iterNodesByType(nodeType)
+			for _node in nodes:
+				count += 1
+				if count >= _SUMMARY_MAX:
+					capped = True
+					break
+				if count % _SUMMARY_BUDGET_EVERY == 0 and time.monotonic() > deadline:
+					capped = True
+					break
+		except NotImplementedError:
+			pass
+		except Exception:
+			log.debugWarning("Mute Browse Mode: could not count %s" % nodeType, exc_info=True)
+		counts[nodeType] = (count, capped)
+	return counts
+
+
+def _countPhrase(nodeType, count, capped):
+	if nodeType == "landmark":
+		# Translators: Part of the page summary announced when a page has loaded.
+		text = ngettext("%d region", "%d regions", count) % count
+	elif nodeType == "heading":
+		# Translators: Part of the page summary announced when a page has loaded.
+		text = ngettext("%d heading", "%d headings", count) % count
+	else:
+		# Translators: Part of the page summary announced when a page has loaded.
+		text = ngettext("%d link", "%d links", count) % count
+	if capped:
+		# Translators: Part of the page summary, used when a page has so many of
+		# something that they were not all counted. {count} is e.g. "1500 links".
+		text = _("over {count}").format(count=text)
+	return text
+
+
+def _summaryText(counts):
+	phrases = {
+		nodeType: _countPhrase(nodeType, *counts[nodeType])
+		for nodeType in _SUMMARY_TYPES
+	}
+	# Translators: Announced when a web page has finished loading.
+	summary = _("Page has {regions}, {headings} and {links}").format(
+		regions=phrases["landmark"],
+		headings=phrases["heading"],
+		links=phrases["link"],
+	)
+	# Translators: Announced when a web page has finished loading, before the summary.
+	return "%s\n%s" % (_("Loading complete"), summary)
+
+
+def _announceSummary(buffer):
+	"""Say what has just loaded, so long as this is a browser and not Outlook."""
+	global _summaryTimer
+	_summaryTimer = None
+	mode = getSummaryMode()
+	if mode == SUMMARY_NORMAL or not getattr(buffer, _ARMED_ATTR, False):
+		return
+	if not _isFocusedBuffer(buffer):
+		# The user left in the last fraction of a second. Leave it armed, so the
+		# document load event still coming can announce it if they come back.
+		return
+	if not getattr(buffer, "isReady", False):
+		return
+	if _bufferTextLength(buffer) == 0:
+		# NVDA is still waiting for content; it will report the document again from
+		# event_documentLoadComplete, and this stays armed for that.
+		return
+
+	root = getattr(buffer, "rootNVDAObject", None)
+	if outlookIsCurrent(root):
+		log.debug("Mute Browse Mode: Outlook is the current program, no page summary")
+		setattr(buffer, _ARMED_ATTR, False)
+		return
+	if not _isWebBrowser(root):
+		log.debug("Mute Browse Mode: not a browser window, no page summary")
+		setattr(buffer, _ARMED_ATTR, False)
+		return
+	setattr(buffer, _ARMED_ATTR, False)
+	if _sayAllRunning():
+		# The user asked for the whole page to be read. Do not talk over it.
+		return
+	if mode == SUMMARY_TONES:
+		_playReadyTones()
+		return
+	with _ownSpeech():
+		ui.message(_summaryText(_countElements(buffer)))
+
+
 ### Monkey patching
 
 #: (owner, name, original, wasOwnAttribute, replacement) for everything we patched.
 _patches = []
+
+#: Flags eventHandler and scriptHandler read off the handler they are about to call,
+#: which have to survive being wrapped.
+_CARRIED_FLAGS = ("ignoreIsReady",)
 
 
 def _patch(owner, name, replacement):
@@ -363,7 +693,15 @@ def _unpatchAll():
 			log.error("Mute Browse Mode: could not restore %s.%s" % (owner, name), exc_info=True)
 
 
-def _hookGate(owner, name, inCall, after, chime=False, onlyIf=None, chimeCheck=None):
+def _adoptOriginal(wrapper, original, name):
+	wrapper.__name__ = name
+	wrapper.__doc__ = getattr(original, "__doc__", None)
+	for flag in _CARRIED_FLAGS:
+		if hasattr(original, flag):
+			setattr(wrapper, flag, getattr(original, flag))
+
+
+def _hookGate(owner, name, inCall, after, chime=False, onlyIf=None, chimeCheck=None, post=None):
 	"""Hold the speech gate open across C{owner.name}.
 
 	@param inCall: seconds the gate is held while the call is on the stack.
@@ -373,28 +711,48 @@ def _hookGate(owner, name, inCall, after, chime=False, onlyIf=None, chimeCheck=N
 		particular call is one of the ones we silence. Checked before the original
 		runs, because some of what it looks at is cleared by the original itself.
 	@param chimeCheck: optional callable(self, args, kwargs) vetoing only the chime.
+	@param post: optional callable(self, args, kwargs) run once the call returns,
+		whatever the mute mode is. The page summary has its own setting, so it must
+		not be switched off by this one.
 	"""
 	original = getattr(owner, name)
 
 	def wrapper(self, *args, **kwargs):
 		mode = getMode()
-		if mode == MODE_NORMAL or (onlyIf is not None and not onlyIf(self, args, kwargs)):
-			return original(self, *args, **kwargs)
-		_openGate(inCall)
+		silence = mode != MODE_NORMAL and (onlyIf is None or onlyIf(self, args, kwargs))
+		if silence:
+			_openGate(inCall)
 		try:
 			return original(self, *args, **kwargs)
 		finally:
-			_openGate(after)
-			if chime and mode == MODE_TONES and (chimeCheck is None or chimeCheck(self, args, kwargs)):
-				_playReadyTones()
+			if silence:
+				_openGate(after)
+				if chime and mode == MODE_TONES and (chimeCheck is None or chimeCheck(self, args, kwargs)):
+					_playReadyTones()
+			if post is not None:
+				try:
+					post(self, args, kwargs)
+				except Exception:
+					log.error("Mute Browse Mode: %s post hook failed" % name, exc_info=True)
 
-	wrapper.__name__ = name
-	wrapper.__doc__ = getattr(original, "__doc__", None)
-	# eventHandler reads flags such as ignoreIsReady off the handler it is about to
-	# call, so anything the original carried has to survive the wrapping.
-	for flag in ("ignoreIsReady",):
-		if hasattr(original, flag):
-			setattr(wrapper, flag, getattr(original, flag))
+	_adoptOriginal(wrapper, original, name)
+	_patch(owner, name, wrapper)
+
+
+def _hookAfter(owner, name, post):
+	"""Run C{post(self, args, kwargs)} once C{owner.name} returns, and nothing else."""
+	original = getattr(owner, name)
+
+	def wrapper(self, *args, **kwargs):
+		try:
+			return original(self, *args, **kwargs)
+		finally:
+			try:
+				post(self, args, kwargs)
+			except Exception:
+				log.error("Mute Browse Mode: %s post hook failed" % name, exc_info=True)
+
+	_adoptOriginal(wrapper, original, name)
 	_patch(owner, name, wrapper)
 
 
@@ -412,8 +770,7 @@ def _hookSilent(owner, name):
 		with _hardMute():
 			return original(self, *args, **kwargs)
 
-	wrapper.__name__ = name
-	wrapper.__doc__ = getattr(original, "__doc__", None)
+	_adoptOriginal(wrapper, original, name)
 	_patch(owner, name, wrapper)
 
 
@@ -424,6 +781,17 @@ def _loadSucceeded(self, args, kwargs):
 	if args:
 		return bool(args[0])
 	return True
+
+
+def _summaryAfterLoad(buffer, args, kwargs):
+	"""_loadBufferDone: queue the summary, but not for a load that failed."""
+	if _loadSucceeded(buffer, args, kwargs):
+		_scheduleSummary(buffer)
+
+
+def _summaryAfterDocumentLoad(buffer, args, kwargs):
+	"""event_documentLoadComplete: the second chance for a buffer that loaded empty."""
+	_scheduleSummary(buffer)
 
 
 def _isEnteringDocument(self, args, kwargs):
@@ -488,10 +856,13 @@ def _onGesture(*args, **kwargs):
 	"""
 	if _gateUntil > 0.0:
 		_closeGate()
+	# A page summary that has not been spoken yet is now stale: the user has stopped
+	# waiting for the page and started using it.
+	_cancelSummary()
 	return True
 
 
-### Speech settings panel
+### Settings
 
 def _selectionForMode(mode):
 	try:
@@ -500,21 +871,65 @@ def _selectionForMode(mode):
 		return MODES.index(MODE_NORMAL)
 
 
+def _selectionForSummaryMode(mode):
+	try:
+		return SUMMARY_MODES.index(mode)
+	except ValueError:
+		return SUMMARY_MODES.index(SUMMARY_SPEAK)
+
+
+def _addChoices(panel, sHelper):
+	"""Add both of this add-on's combo boxes to C{panel}."""
+	panel._muteBrowseModeChoice = sHelper.addLabeledControl(
+		# Translators: Label of a combo box added to NVDA's Browse Mode settings.
+		_("Mute &browse mode:"),
+		wx.Choice,
+		choices=getModeLabels(),
+	)
+	panel._muteBrowseModeChoice.SetSelection(_selectionForMode(getMode()))
+	panel._muteBrowseModeSummaryChoice = sHelper.addLabeledControl(
+		# Translators: Label of a combo box added to NVDA's Browse Mode settings.
+		_("Announce a &page summary when a page has loaded:"),
+		wx.Choice,
+		choices=getSummaryModeLabels(),
+	)
+	panel._muteBrowseModeSummaryChoice.SetSelection(_selectionForSummaryMode(getSummaryMode()))
+
+
+def _saveChoices(panel):
+	choice = getattr(panel, "_muteBrowseModeChoice", None)
+	if choice is not None:
+		index = choice.GetSelection()
+		if 0 <= index < len(MODES):
+			setMode(MODES[index])
+	choice = getattr(panel, "_muteBrowseModeSummaryChoice", None)
+	if choice is not None:
+		index = choice.GetSelection()
+		if 0 <= index < len(SUMMARY_MODES):
+			setSummaryMode(SUMMARY_MODES[index])
+
+
+def _refreshChoices(panel):
+	choice = getattr(panel, "_muteBrowseModeChoice", None)
+	if choice is not None:
+		choice.SetSelection(_selectionForMode(getMode()))
+	choice = getattr(panel, "_muteBrowseModeSummaryChoice", None)
+	if choice is not None:
+		choice.SetSelection(_selectionForSummaryMode(getSummaryMode()))
+
+
 def _makeSettingsWrapper(original):
 	def makeSettings(self, settingsSizer):
 		original(self, settingsSizer)
 		try:
-			sHelper = guiHelper.BoxSizerHelper(self, sizer=settingsSizer)
-			self._muteBrowseModeChoice = sHelper.addLabeledControl(
-				# Translators: Label of a combo box added to NVDA's Speech settings.
-				_("&Mute browse mode:"),
-				wx.Choice,
-				choices=getModeLabels(),
-			)
-			self._muteBrowseModeChoice.SetSelection(_selectionForMode(getMode()))
+			_addChoices(self, guiHelper.BoxSizerHelper(self, sizer=settingsSizer))
 		except Exception:
 			self._muteBrowseModeChoice = None
-			log.error("Mute Browse Mode: could not add the combo box to Speech settings", exc_info=True)
+			self._muteBrowseModeSummaryChoice = None
+			log.error(
+				"Mute Browse Mode: could not add the combo boxes to Browse Mode settings",
+				exc_info=True,
+			)
 
 	return makeSettings
 
@@ -522,57 +937,43 @@ def _makeSettingsWrapper(original):
 def _onSaveWrapper(original):
 	def onSave(self):
 		original(self)
-		choice = getattr(self, "_muteBrowseModeChoice", None)
-		if choice is None:
-			return
-		index = choice.GetSelection()
-		if 0 <= index < len(MODES):
-			setMode(MODES[index])
+		_saveChoices(self)
 
 	return onSave
 
 
 def _onPanelActivatedWrapper(original):
 	def onPanelActivated(self):
-		# NVDA reuses the settings dialog, so refresh in case the mode was changed
-		# elsewhere (a profile switch, or the cycle script) since it was built.
-		choice = getattr(self, "_muteBrowseModeChoice", None)
-		if choice is not None:
-			choice.SetSelection(_selectionForMode(getMode()))
+		# NVDA reuses the settings dialog, so refresh in case a setting was changed
+		# elsewhere (a profile switch, or one of the cycle scripts) since it was built.
+		_refreshChoices(self)
 		original(self)
 
 	return onPanelActivated
 
 
-def _patchSpeechPanel():
-	panel = settingsDialogs.SpeechSettingsPanel
+def _patchBrowseModePanel():
+	panel = settingsDialogs.BrowseModePanel
 	_patch(panel, "makeSettings", _makeSettingsWrapper(panel.makeSettings))
 	_patch(panel, "onSave", _onSaveWrapper(panel.onSave))
 	_patch(panel, "onPanelActivated", _onPanelActivatedWrapper(panel.onPanelActivated))
 
 
-### Fallback settings panel
-
 class MuteBrowseModePanel(settingsDialogs.SettingsPanel):
-	"""Only registered if the combo box could not be injected into the Speech panel."""
+	"""Only registered if the combo boxes could not be injected into Browse Mode."""
 
 	# Translators: Title of the add-on's own settings category, used as a fallback.
 	title = _("Mute Browse Mode")
 
 	def makeSettings(self, settingsSizer):
-		sHelper = guiHelper.BoxSizerHelper(self, sizer=settingsSizer)
-		self._muteBrowseModeChoice = sHelper.addLabeledControl(
-			# Translators: Label of a combo box added to NVDA's Speech settings.
-			_("&Mute browse mode:"),
-			wx.Choice,
-			choices=getModeLabels(),
-		)
-		self._muteBrowseModeChoice.SetSelection(_selectionForMode(getMode()))
+		_addChoices(self, guiHelper.BoxSizerHelper(self, sizer=settingsSizer))
 
 	def onSave(self):
-		index = self._muteBrowseModeChoice.GetSelection()
-		if 0 <= index < len(MODES):
-			setMode(MODES[index])
+		_saveChoices(self)
+
+	def onPanelActivated(self):
+		_refreshChoices(self)
+		super().onPanelActivated()
 
 
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):
@@ -581,7 +982,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
 	def __init__(self):
 		super().__init__()
-		self._speechPanelPatched = False
+		self._panelPatched = False
 		self._ownPanelAdded = False
 		self._gestureHandlerRegistered = False
 
@@ -614,11 +1015,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			log.error("Mute Browse Mode: could not hook input gestures", exc_info=True)
 
 		try:
-			_patchSpeechPanel()
-			self._speechPanelPatched = True
+			_patchBrowseModePanel()
+			self._panelPatched = True
 		except Exception:
 			log.error(
-				"Mute Browse Mode: could not extend the Speech settings panel, "
+				"Mute Browse Mode: could not extend the Browse Mode settings panel, "
 				"falling back to a separate settings category",
 				exc_info=True,
 			)
@@ -655,14 +1056,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 				dict(inCall=_IN_CALL_GATE, after=_TRAILING_GATE, chime=True),
 			),
 			# A virtual buffer starting to load, which is what silences "Loading
-			# document...".
+			# document...", and the point the page summary is owed from.
 			(
 				virtualBuffers.VirtualBuffer,
 				"loadBuffer",
-				dict(inCall=_LOAD_GATE, after=_LOAD_GATE),
+				dict(inCall=_LOAD_GATE, after=_LOAD_GATE, post=_armSummary),
 			),
 			# ...and finishing, which speaks "Refreshed" on a reload and is the moment
-			# the chime belongs to.
+			# both the chime and the page summary belong to.
 			(
 				virtualBuffers.VirtualBuffer,
 				"_loadBufferDone",
@@ -671,6 +1072,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 					after=_TRAILING_GATE,
 					chime=True,
 					chimeCheck=_loadSucceeded,
+					post=_summaryAfterLoad,
 				),
 			),
 		)
@@ -679,6 +1081,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 				_hookGate(owner, name, **options)
 			except Exception:
 				log.error("Mute Browse Mode: could not hook %s.%s" % (owner.__name__, name), exc_info=True)
+
+		# A buffer that finished loading empty is one NVDA is still waiting on; it
+		# reports the document from this event instead, and so do we.
+		try:
+			_hookAfter(virtualBuffers.VirtualBuffer, "event_documentLoadComplete", _summaryAfterDocumentLoad)
+		except Exception:
+			log.error("Mute Browse Mode: could not hook event_documentLoadComplete", exc_info=True)
 
 	def _installNoiseHooks(self):
 		"""Live regions and alerts, silenced in Outlook and Chromium only.
@@ -717,6 +1126,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 				log.error("Mute Browse Mode: could not hook %s.%s" % (owner.__name__, name), exc_info=True)
 
 	def terminate(self):
+		_cancelSummary()
 		_resetGates()
 		if self._ownPanelAdded:
 			try:
@@ -760,3 +1170,38 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		setMode(MODES[index])
 		_resetGates()
 		ui.message(getModeLabels()[index])
+
+	@scriptHandler.script(
+		# Translators: Description of a command, shown in the Input Gestures dialog.
+		description=_("Cycles the page summary setting between speak, tones and normal"),
+	)
+	def script_cyclePageSummary(self, gesture):
+		index = (_selectionForSummaryMode(getSummaryMode()) + 1) % len(SUMMARY_MODES)
+		setSummaryMode(SUMMARY_MODES[index])
+		ui.message(getSummaryModeLabels()[index])
+
+	@scriptHandler.script(
+		description=_(
+			# Translators: Description of a command, shown in the Input Gestures dialog.
+			"Passes control+F straight to the program, so that it forwards the current "
+			"message in Microsoft Outlook. NVDA's own find stays on NVDA+control+F",
+		),
+		gesture="kb:control+f",
+	)
+	def script_passThroughControlF(self, gesture):
+		"""Make sure control+F belongs to the application and never to NVDA.
+
+		In Microsoft Outlook control+F is Forward, and it has to reach Outlook for the
+		message to be forwarded. Binding it here rather than leaving it unbound is what
+		guarantees that: a global plugin script is the first thing NVDA looks at, ahead
+		of the browse mode document and everything else that might otherwise claim the
+		key, and this one does nothing but hand the keystroke on. NVDA ignores the keys
+		it injects itself, so this cannot come back round.
+
+		Nothing is lost elsewhere: control+F reaching the program is exactly what a
+		browser's or an editor's find bar wants too. NVDA's find is unaffected, because
+		NVDA binds that to NVDA+control+F.
+		"""
+		if outlookIsCurrent():
+			log.debug("Mute Browse Mode: passing control+F to Outlook to forward the message")
+		gesture.send()
