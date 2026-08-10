@@ -77,6 +77,16 @@ you have already left can never end the announcement of the one you have arrived
 Pressing a key ends the wait early, because you have stopped listening and started
 working.</p>
 
+<p>The title of a browser window is read out in full when you switch to it, even
+though browser window titles are silent the rest of the time. Switching between two
+browser windows needs this: the alt and tab switcher names each window as you cycle
+through them, and the moment one is actually activated NVDA stops that mid word, so
+with nothing said afterwards all you were left with was the fragment the switcher got
+through. Nothing that happens while the title is being read can cut it short either,
+including the browse mode document arriving behind it. Microsoft Outlook is the
+exception, because there the brief description of the focus takes the title's
+place.</p>
+
 <h2>Switching to Microsoft Outlook</h2>
 
 <p>When you switch to Outlook from another program, NVDA answers with a brief
@@ -106,10 +116,16 @@ there, NVDA now says:</p>
 <p>You are now in the message body, type a message.</p>
 </blockquote>
 
-<p>It is said after NVDA's own announcement of the field, and only for a body you can
-actually type into: the read-only body in the reading pane is left alone, as are the
-address and subject fields, which are editable text as well but only take one line.
-Tabbing away and back says it again; a message body raising a second focus event on
+<p>It is said after NVDA's own announcement of the field, and only for the message body
+itself. Nearly everything on a message form is an editable field, so "can this be
+typed into" is not the test. The body is identified instead: NVDA marks the message
+body object as such and nothing else on the form that way, the editor Outlook composes
+in has a window of its own that no field shares, and the plain text body is the one
+rich edit control NVDA picks out by name and number. A body that cannot be typed into,
+such as the one in the reading pane, is left alone, because the announcement invites
+you to type.</p>
+
+<p>Tabbing away and back says it again; a message body raising a second focus event on
 its own does not. Like the rest of the Outlook behaviour, it is quiet when the first
 combo box is set to Normal.</p>
 
@@ -196,6 +212,20 @@ happens.</li>
 </ul>
 
 <h2>Changes</h2>
+
+<h3>1.6</h3>
+<ul>
+<li>Fixed "You are now in the message body" being said for every field on an Outlook
+message form. Nearly all of them are editable, and the ones the user tabs through on
+the way to the body, To, Cc and Subject, are rich edit controls that take more than one
+line, which is exactly what the body was being recognised by. The body is now
+identified rather than guessed at, from the marker NVDA's own Outlook support puts on
+it, from the window Outlook composes in, and from the control number of the plain text
+body.</li>
+<li>Fixed only part of a browser window's title being read when switching between two
+browser windows. The window title is now read out in full on a switch, and nothing that
+happens behind it can cut it short.</li>
+</ul>
 
 <h3>1.5</h3>
 <ul>

@@ -345,6 +345,16 @@ _TITLE_ROLES = _members(
 	),
 )
 
+#: The subset of the above whose name is the title of a whole window, as opposed to a
+#: dialog or a document. These are the ones that come back when a window is switched
+#: to, because that title is the only thing telling the user where they have landed.
+#: DIALOG and DOCUMENT stay out of it: the dialog is the word an opening Outlook
+#: message says, and the document is the page title the add-on exists to silence.
+_WINDOW_TITLE_ROLES = _members(
+	controlTypes.Role,
+	("WINDOW", "PANE", "FRAME", "INTERNALFRAME", "APPLICATION"),
+)
+
 #: Roles used for toasts, flash messages and other transient announcements.
 _ALERT_ROLES = _members(controlTypes.Role, ("ALERT", "TOOLTIP", "HELPBALLOON", "NOTIFICATION"))
 
@@ -947,54 +957,81 @@ def _speakBriefFocus(sequence):
 
 ### The Outlook message body
 
-#: Window classes Outlook renders a message body into: the Word editor it composes
-#: rich text in, the HTML control, and the plain text one.
-_OUTLOOK_BODY_WINDOW_CLASSES = frozenset((
-	"_WwG",
-	"_WwB",
-	"Internet Explorer_Server",
-	"RichEdit20W",
-	"RICHEDIT50W",
-))
+#: Window classes that are only ever the Word editing surface Outlook composes a
+#: message in. Deliberately not "RichEdit20W": NVDA's own Outlook support treats every
+#: window whose class starts with that as a contact edit field, which is what To, Cc
+#: and Subject are, so matching on it announced the message body for all of them.
+_OUTLOOK_BODY_WINDOW_CLASSES = frozenset(("_WwG", "_WwB"))
+
+#: The one RichEdit control in Outlook that is a message body rather than a field:
+#: the plain text message, which NVDA identifies by exactly this class and id.
+_PLAIN_TEXT_BODY_CLASS = "RichEdit20W"
+_PLAIN_TEXT_BODY_CONTROL_ID = 8224
+
+#: Names the message body goes by where nothing else identifies it, used together with
+#: several other tests rather than on its own.
+_BODY_NAMES = frozenset(("message", "message body"))
 
 #: Roles a message body can have. Everything else the user tabs through on the way to
-#: it, To, Cc, Subject and the toolbars, has some other role or is a single line.
+#: it, To, Cc, Subject and the toolbars, has some other role.
 _BODY_ROLES = _members(controlTypes.Role, ("DOCUMENT", "EDITABLETEXT"))
 
 _STATE_READONLY = getattr(controlTypes.State, "READONLY", None)
 _STATE_UNAVAILABLE = getattr(controlTypes.State, "UNAVAILABLE", None)
 _STATE_MULTILINE = getattr(controlTypes.State, "MULTILINE", None)
-_ROLE_DOCUMENT = getattr(controlTypes.Role, "DOCUMENT", None)
+
+
+def _hasState(states, state):
+	return state is not None and state in states
 
 
 def _isOutlookMessageBody(obj):
 	"""Whether the focus has landed in an Outlook message body that can be typed into.
 
-	The address and subject fields are editable text too, so a plain "is this editable"
-	test is not enough to tell them apart. What separates the body from them is that it
-	takes more than one line, or that it is a whole document rather than a field, or
-	that it is one of the windows Outlook only ever puts a message body in. A body the
-	user cannot type into, such as the one in the reading pane, is not announced,
-	because the announcement invites them to type.
+	Being editable is not the test. The address and subject fields are editable text
+	too, and so is nearly everything else on a message form, which is why anything
+	that loose ends up announcing the message body for the lot of them. What is needed
+	is a positive identification of the body itself, and there are three:
+
+	* NVDA's own Outlook support puts C{isReadonlyViewer} on the message body object
+	  and on nothing else, so having that attribute at all is the identification, and
+	  its value says whether this is a message being written or one being read;
+	* the Word editing surface Outlook composes in has a window class of its own,
+	  which no field on the form shares;
+	* the plain text body is the one RichEdit control NVDA picks out by control id.
+
+	A body the user cannot type into, such as the one in the reading pane, is never
+	announced, because the announcement invites them to type.
 	"""
 	if not _isOutlook(obj):
 		return False
-	role = getattr(obj, "role", None)
-	if role not in _BODY_ROLES:
+	if getattr(obj, "role", None) not in _BODY_ROLES:
 		return False
 	try:
 		states = set(obj.states or ())
 	except Exception:
 		states = set()
-	if _STATE_READONLY is not None and _STATE_READONLY in states:
+	if _hasState(states, _STATE_READONLY) or _hasState(states, _STATE_UNAVAILABLE):
 		return False
-	if _STATE_UNAVAILABLE is not None and _STATE_UNAVAILABLE in states:
+
+	viewer = getattr(obj, "isReadonlyViewer", None)
+	if viewer is not None:
+		# An Outlook message body, and NVDA has already worked out which kind.
+		return not viewer
+	windowClass = _windowClassOf(obj)
+	if windowClass in _OUTLOOK_BODY_WINDOW_CLASSES:
+		return True
+	if (
+		windowClass == _PLAIN_TEXT_BODY_CLASS
+		and getattr(obj, "windowControlID", None) == _PLAIN_TEXT_BODY_CONTROL_ID
+	):
+		return True
+	# Outlook built on a web view has none of the above. Take a name that says it is
+	# the body, but only along with taking more than one line, which no address or
+	# subject field does.
+	if not _hasState(states, _STATE_MULTILINE):
 		return False
-	if _windowClassOf(obj) in _OUTLOOK_BODY_WINDOW_CLASSES:
-		return True
-	if role == _ROLE_DOCUMENT:
-		return True
-	return _STATE_MULTILINE is not None and _STATE_MULTILINE in states
+	return (getattr(obj, "name", "") or "").strip().lower() in _BODY_NAMES
 
 
 def _announceMessageBody():
@@ -1196,7 +1233,18 @@ def _shouldDropObjectSpeech(args, kwargs):
 		return False
 	if role not in _TITLE_ROLES and role not in _ALERT_ROLES:
 		return False
-	return _targetOf(obj) is not None
+	target = _targetOf(obj)
+	if target is None:
+		return False
+	if target != TARGET_OUTLOOK and role in _WINDOW_TITLE_ROLES and _announcingNow():
+		# The title of a window the user has just switched to. Alt+tab between two
+		# browser windows is the case that needs this: the switcher names each window
+		# as it is cycled through, and the moment one is actually activated NVDA
+		# cancels that, so dropping the title afterwards as well left the user with
+		# nothing but the fragment the switcher got through. Outlook is the exception,
+		# because there the brief description of the focus takes the title's place.
+		return False
+	return True
 
 
 def _onGesture(*args, **kwargs):
@@ -1375,6 +1423,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			speakObjectWrapper = self._makeSpeakObjectWrapper(speech.speech.speakObject)
 			_patch(speech.speech, "speakObject", speakObjectWrapper)
 			_patch(speech, "speakObject", speakObjectWrapper)
+
+			# The document announcement must not cut off the window title in front of it.
+			cancelWrapper = self._makeCancelSpeechWrapper(speech.speech.cancelSpeech)
+			_patch(speech.speech, "cancelSpeech", cancelWrapper)
+			_patch(speech, "cancelSpeech", cancelWrapper)
 		except Exception:
 			log.error("Mute Browse Mode: could not install speech hooks", exc_info=True)
 			_unpatchAll()
@@ -1609,6 +1662,29 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		speak.__name__ = "speak"
 		speak.__doc__ = getattr(original, "__doc__", None)
 		return speak
+
+	def _makeCancelSpeechWrapper(self, original):
+		"""Stop the document announcement cancelling the window title before it.
+
+		``BrowseModeDocumentTreeInterceptor.event_gainFocus`` cancels speech when the
+		focus lands somewhere that puts the document into focus mode, on the reasoning
+		that a focus change should stop the page being read aloud. Arriving from
+		another window there is no page being read aloud yet, only the title of the
+		window just switched to, and cancelling that is what cut it off half way.
+
+		Scoped as tightly as it can be: only while one of the hooked document calls is
+		on the stack, and only while a window is being announced. Every other cancel in
+		NVDA, including the one the foreground change itself makes, is untouched.
+		"""
+
+		def cancelSpeech(*args, **kwargs):
+			if getMode() != MODE_NORMAL and _inCallDepth > 0 and _announcingNow():
+				return
+			return original(*args, **kwargs)
+
+		cancelSpeech.__name__ = "cancelSpeech"
+		cancelSpeech.__doc__ = getattr(original, "__doc__", None)
+		return cancelSpeech
 
 	def _makeSpeakObjectWrapper(self, original):
 		def speakObject(*args, **kwargs):

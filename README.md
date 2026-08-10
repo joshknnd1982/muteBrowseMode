@@ -69,6 +69,26 @@ why switching out of Outlook, the one place the add-on speaks an utterance of it
 was where the half-read title showed up. An announcement also stays open for 250 ms
 after its last utterance, so a gap between two parts of one cannot close it either.
 
+### The window title itself
+
+A browser window's title is read in full on a switch, even though browser window titles
+are dropped by role the rest of the time. Switching between two browser windows is what
+needs it: the alt+tab switcher names each window as you cycle, `event_foreground` calls
+`speech.cancelSpeech()` the moment one activates, and with the post-switch title also
+suppressed the user was left with only the fragment the switcher got through. So
+`_shouldDropObjectSpeech` releases the window-title roles (`WINDOW`, `PANE`, `FRAME`,
+`INTERNALFRAME`, `APPLICATION`) while a foreground announcement is running, outside
+Outlook. `DIALOG` and `DOCUMENT` stay dropped — the dialog is the word an opening
+Outlook message says, and the document is the page title the add-on exists to silence.
+
+`speech.cancelSpeech` is also wrapped, and does nothing while a hooked document call is
+on the stack during a foreground announcement.
+`BrowseModeDocumentTreeInterceptor.event_gainFocus` cancels speech when the focus lands
+somewhere that forces focus mode, on the reasoning that a focus change should stop the
+page being read aloud; arriving from another window there is no page being read aloud
+yet, only the title, and cancelling that is what cut it off. Every other cancel in NVDA,
+including the one the foreground change itself makes, is untouched.
+
 ## Switching to Microsoft Outlook
 
 Arriving in Outlook from another program answers with a brief description of where you
@@ -94,11 +114,24 @@ Said after NVDA's own announcement of the field, not before — a message body t
 browse mode document calls `speech.cancelSpeech()` on its way into focus mode, so
 anything said first would be cut off by it.
 
-Only for a body you can type into. The address and subject fields are editable text
-too, so the test is not "is this editable": the body is the one that takes more than
-one line, or is a whole document rather than a field, or lives in a window Outlook only
-ever puts a message body in (`_WwG`, `Internet Explorer_Server`, `RichEdit20W`). A
-read-only body, such as the reading pane, is left alone, because the announcement
+Only for the message body itself. Nearly everything on a message form is editable, so
+"is this editable" is not the test, and neither is "does it take more than one line" —
+Outlook's recipient fields wrap, so they are multiline rich edit controls too. The body
+is identified positively instead, by any of:
+
+- **`obj.isReadonlyViewer`** — NVDA's `appModules/outlook.py` puts this on the message
+  body object (`BaseOutlookWordDocument`) and on nothing else, so its mere presence is
+  the identification, and its value says whether the message is being written or read.
+- **window class `_WwG` / `_WwB`** — the Word editing surface Outlook composes in. No
+  field on the form shares it. Deliberately *not* `RichEdit20W`: NVDA classes every
+  window whose class starts with that as a `ContactEditField`, which is what To, Cc and
+  Subject are.
+- **`RichEdit20W` with control id 8224** — the one rich edit control that is a body,
+  which is how NVDA itself picks out the plain text message.
+- a web-view Outlook body, which has none of the above, needs both a name saying it is
+  the body and more than one line.
+
+A read-only body, such as the reading pane, is left alone, because the announcement
 invites you to type. Tabbing away and back says it again; the same body raising a
 second focus event does not.
 
@@ -144,7 +177,9 @@ Neither of the two silencing choices stops at the document announcement in Micro
 Outlook or in Chromium based browsers. There, NVDA also stops speaking:
 
 - **window titles**, so switching to Outlook no longer reads the title of the message
-  list window and opening a message no longer reads the title of the message window;
+  list window and opening a message no longer reads the title of the message window.
+  The one exception is a browser window being switched to, which is read in full — see
+  [The window title itself](#the-window-title-itself) above;
 - **dialogs**, so opening an Outlook message no longer says the word "dialog". A
   message opens inside a dialog, and NVDA announces it while walking down the focus
   ancestors, which happens before the message document exists;
@@ -170,7 +205,7 @@ NVDA+t for the title, NVDA+tab for the focus and NVDA+b for a whole dialog all u
 python build.py
 ```
 
-That writes `muteBrowseMode-1.5.nvda-addon` next to `build.py`. Open it to install,
+That writes `muteBrowseMode-1.6.nvda-addon` next to `build.py`. Open it to install,
 or drag it onto NVDA.
 
 ## How it works
