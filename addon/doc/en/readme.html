@@ -55,6 +55,43 @@ box is set to play tones as well, you still only hear them once.</p>
 <h3>Normal</h3>
 <p>No summary. NVDA does whatever the first combo box leaves it doing.</p>
 
+<h3>Say "loading complete" before the page summary</h3>
+
+<p>A check box under the two combo boxes. Untick it and the summary is just "Page has
+8 regions, 57 headings and 196 links", with no "Loading complete" in front of it. It
+is ticked to start with.</p>
+
+<h2>Switching windows</h2>
+
+<p>Nothing is ever silenced while NVDA is announcing a window you have just switched
+to. The title of the window, and the control the focus landed on, are always read
+right to the end first, and only then does the silencing start again. The one thing
+that stays silent throughout is the browse mode document itself, which is the whole
+point of the add-on.</p>
+
+<p>"Read right to the end" is the synthesiser's word for it, not a guess at how long a
+title takes: the add-on asks NVDA to tell it when speech has actually reached the end
+of the announcement. Pressing a key ends the wait early, because you have stopped
+listening and started working.</p>
+
+<h2>Switching to Microsoft Outlook</h2>
+
+<p>When you switch to Outlook from another program, NVDA answers with a brief
+description of where you have landed: the field the focus is in, what the focus is,
+what is in it, and where it sits, for example:</p>
+
+<blockquote>
+<p>Inbox, list, Josh Kennedy build 1.4, list item, 3 of 57</p>
+</blockquote>
+
+<p>Where the focus is a control that holds a choice rather than a list of them, such as
+a combo box, the selected item is included too.</p>
+
+<p>This replaces NVDA's own report rather than being added to it, so nothing is said
+twice. NVDA still does everything else it would have done, so braille and NVDA's own
+caches are exactly as they always were. It only happens when Outlook was not already
+the program you were in, and only when the first combo box is not set to Normal.</p>
+
 <h2>Where the summary happens, and where it does not</h2>
 
 <p>The summary is only ever announced when <strong>Microsoft Outlook is not the
@@ -138,6 +175,20 @@ happens.</li>
 </ul>
 
 <h2>Changes</h2>
+
+<h3>1.4</h3>
+<ul>
+<li>Fixed the announcement of a window you switch to being cut short. A page still
+loading held the silence open for fifteen seconds, and a document announcement held it
+for another second and a half, and either of those could swallow the title of the
+window you had just switched to and the control the focus landed on. The silence now
+stands down for the whole of that announcement and starts again only once the
+synthesiser has finished saying it.</li>
+<li>Switching to Microsoft Outlook from another program now answers with a brief
+description of the field the focus is in, what is in it, and the selected item where
+there is one, in place of NVDA's own report.</li>
+<li>Added a check box for the "loading complete" part of the page summary.</li>
+</ul>
 
 <h3>1.3</h3>
 <ul>

@@ -65,6 +65,14 @@ except Exception:
 	# gettext ``_`` into builtins anyway, so this is only belt and braces.
 	log.debugWarning("Mute Browse Mode: translations unavailable", exc_info=True)
 
+try:
+	from speech.commands import CallbackCommand as _CallbackCommand
+except Exception:
+	# Without it the foreground announcement cannot be told exactly when it has been
+	# spoken, and falls back to running to its ceiling. Everything else still works.
+	_CallbackCommand = None
+	log.debugWarning("Mute Browse Mode: CallbackCommand unavailable", exc_info=True)
+
 if "ngettext" not in globals():
 	# initTranslation puts ngettext in this module's globals. NVDA only installs ``_``
 	# into builtins, so if that call failed there would otherwise be no plural form.
@@ -92,6 +100,7 @@ SUMMARY_MODES = (SUMMARY_SPEAK, SUMMARY_TONES, SUMMARY_NORMAL)
 config.conf.spec[CONF_SECTION] = {
 	"mode": 'option("silence", "tones", "normal", default="normal")',
 	"pageSummary": 'option("speak", "tones", "normal", default="speak")',
+	"announceLoadingComplete": "boolean(default=True)",
 }
 
 
@@ -142,6 +151,17 @@ def getSummaryMode():
 
 def setSummaryMode(mode):
 	config.conf[CONF_SECTION]["pageSummary"] = mode
+
+
+def getAnnounceLoadingComplete():
+	try:
+		return bool(config.conf[CONF_SECTION]["announceLoadingComplete"])
+	except Exception:
+		return True
+
+
+def setAnnounceLoadingComplete(enabled):
+	config.conf[CONF_SECTION]["announceLoadingComplete"] = bool(enabled)
 
 
 ### The applications we treat specially
@@ -350,8 +370,22 @@ _LOAD_GATE = 15.0
 #: Longest a single silenced call may hold speech shut, whatever happens inside it.
 _MUTE_CEILING = 5.0
 
+#: How long a foreground announcement may hold the deadline gate off, whatever
+#: happens. A ceiling, not a target: the announcement normally ends itself the moment
+#: the synthesiser finishes saying it.
+_ANNOUNCE_CEILING = 8.0
+#: How long after a foreground change we wait to see whether NVDA is going to say
+#: anything at all before giving up on the announcement, in milliseconds.
+_ANNOUNCE_SETTLE = 300
+
 #: Monotonic timestamp at which speech is allowed through again. 0 means open.
 _gateUntil = 0.0
+#: Depth of nested "we are inside a document announcement right now" wrappers, and the
+#: latest moment they may keep speech shut. This is the gate that actually silences the
+#: document: NVDA speaks all of it inline, so being inside the call is enough, and it
+#: cannot bleed into whatever NVDA says next.
+_inCallDepth = 0
+_inCallUntil = 0.0
 #: Depth of nested "silence just this call" wrappers, and the latest moment any of them
 #: may keep speech shut. Both have to agree, so even a lost decrement expires by itself.
 _muteDepth = 0
@@ -359,6 +393,11 @@ _muteUntil = 0.0
 #: Depth of nested "this is the add-on speaking" wrappers. Speech from inside one of
 #: these is never gated: it is the add-on's own announcement, not NVDA's.
 _bypassDepth = 0
+#: Latest moment the foreground announcement may still be running, and how many
+#: utterances of it the synthesiser has not reached yet. While this is live the
+#: deadline gate stands down, so alt+tab is never cut off.
+_announceUntil = 0.0
+_announcePending = 0
 
 
 def _openGate(seconds):
@@ -369,6 +408,20 @@ def _openGate(seconds):
 def _closeGate():
 	global _gateUntil
 	_gateUntil = 0.0
+
+
+def _enterDocumentCall():
+	global _inCallDepth, _inCallUntil
+	_inCallDepth += 1
+	_inCallUntil = max(_inCallUntil, time.monotonic() + _IN_CALL_GATE)
+
+
+def _exitDocumentCall():
+	global _inCallDepth, _inCallUntil
+	_inCallDepth -= 1
+	if _inCallDepth <= 0:
+		_inCallDepth = 0
+		_inCallUntil = 0.0
 
 
 class _hardMute:
@@ -413,10 +466,13 @@ class _ownSpeech:
 
 
 def _resetGates():
-	global _muteDepth, _muteUntil, _bypassDepth
+	global _muteDepth, _muteUntil, _bypassDepth, _inCallDepth, _inCallUntil
 	_muteDepth = 0
 	_muteUntil = 0.0
 	_bypassDepth = 0
+	_inCallDepth = 0
+	_inCallUntil = 0.0
+	_endAnnouncement()
 	_closeGate()
 
 
@@ -435,7 +491,12 @@ def _isGated():
 	now = time.monotonic()
 	if _muteDepth > 0 and now < _muteUntil:
 		return True
-	if _gateUntil <= 0.0 or now >= _gateUntil:
+	inCall = _inCallDepth > 0 and now < _inCallUntil
+	# The deadline gate stands down while NVDA is announcing a new foreground window.
+	# Only the in-call gate above survives that, and it only covers the document
+	# announcement itself, which NVDA speaks entirely inline.
+	deadline = _gateUntil > 0.0 and now < _gateUntil and not _announcingNow()
+	if not inCall and not deadline:
 		return False
 	if _sayAllRunning():
 		# Say all is an explicit "read this to me" request, including read on page
@@ -443,6 +504,85 @@ def _isGated():
 		_closeGate()
 		return False
 	return True
+
+
+### The foreground announcement
+#
+# Alt+tab makes NVDA announce, in this order, the title of the window being switched
+# to, then the browse mode document if there is one, then the control the focus landed
+# on. Only the middle one is ours to silence, and NVDA speaks all of it inline, so the
+# in-call gate above is enough for it. The deadline gate is not: a page that is still
+# loading holds it open for fifteen seconds, and the trailing gate after a document
+# announcement holds it for another second and a half, and either of those would eat
+# the announcement of the control the user has just switched to.
+#
+# So a foreground change stands the deadline gate down until NVDA has finished
+# speaking. "Finished" is the synthesiser's word, not a guess: a CallbackCommand is
+# appended to each utterance we let through, and NVDA runs it when speech actually
+# reaches that point.
+
+
+def _announcingNow():
+	return _announceUntil > 0.0 and time.monotonic() < _announceUntil
+
+
+def _beginAnnouncement():
+	"""A new window has come to the front, so stop silencing until it has been read."""
+	global _announceUntil, _announcePending
+	_announcePending = 0
+	_announceUntil = time.monotonic() + _ANNOUNCE_CEILING
+	core.callLater(_ANNOUNCE_SETTLE, _endAnnouncementIfSilent, _announceUntil)
+
+
+def _endAnnouncement():
+	global _announceUntil, _announcePending
+	_announceUntil = 0.0
+	_announcePending = 0
+
+
+def _endAnnouncementIfSilent(startedAt):
+	"""Nothing was queued in the moment after the switch, so there is nothing to wait for.
+
+	Keyed to the announcement it was scheduled for, so a second window switch inside
+	the settle time cannot be cut short by the first one's timer.
+	"""
+	if startedAt == _announceUntil and _announcePending <= 0:
+		_endAnnouncement()
+
+
+def _announcementSpoken():
+	"""The synthesiser has reached the end of one utterance of the announcement."""
+	global _announcePending
+	_announcePending -= 1
+	if _announcePending <= 0:
+		_endAnnouncement()
+
+
+def _tagAnnouncement(args, kwargs):
+	"""Append the "this has now been spoken" callback to a speech sequence.
+
+	Returns the arguments to call the real ``speak`` with. If anything about the call
+	is not what we expect, they come back untouched: a missed tag only means the
+	announcement runs to its ceiling instead of ending exactly on time.
+	"""
+	global _announcePending
+	if _CallbackCommand is None:
+		return args, kwargs
+	if args:
+		sequence = args[0]
+	elif "speechSequence" in kwargs:
+		sequence = kwargs["speechSequence"]
+	else:
+		return args, kwargs
+	if not isinstance(sequence, list) or not sequence:
+		return args, kwargs
+	tagged = sequence + [_CallbackCommand(_announcementSpoken, name="muteBrowseMode.announced")]
+	_announcePending += 1
+	if args:
+		return (tagged,) + tuple(args[1:]), kwargs
+	kwargs = dict(kwargs)
+	kwargs["speechSequence"] = tagged
+	return args, kwargs
 
 
 ### The ready chime
@@ -617,6 +757,8 @@ def _summaryText(counts):
 		headings=phrases["heading"],
 		links=phrases["link"],
 	)
+	if not getAnnounceLoadingComplete():
+		return summary
 	# Translators: Announced when a web page has finished loading, before the summary.
 	return "%s\n%s" % (_("Loading complete"), summary)
 
@@ -657,6 +799,122 @@ def _announceSummary(buffer):
 		return
 	with _ownSpeech():
 		ui.message(_summaryText(_countElements(buffer)))
+
+
+### Arriving in Outlook
+
+#: How long after Outlook comes to the front we keep waiting for the focus to settle
+#: on something worth describing.
+_OUTLOOK_ARRIVAL_WINDOW = 3.0
+#: A container with more children than this is never scanned for its selected item.
+#: Outlook message lists run to thousands of rows, and NVDA must not be held up.
+_MAX_CHILDREN_SCANNED = 100
+
+#: Roles the focus passes through while an application is still coming to the front.
+#: Landing on one of these means Outlook has not settled yet, so keep waiting.
+_TRANSIENT_FOCUS_ROLES = _members(controlTypes.Role, ("WINDOW", "PANE", "FRAME", "APPLICATION"))
+
+#: Roles that name the field an item sits in: the "message list" an Outlook message is
+#: a row of, the folder tree a folder is in, and so on.
+_CONTAINER_ROLES = _members(
+	controlTypes.Role,
+	(
+		"LIST",
+		"TREEVIEW",
+		"TABLE",
+		"DATAGRID",
+		"DATAITEM",
+		"TABCONTROL",
+		"TOOLBAR",
+		"GROUPING",
+		"PROPERTYPAGE",
+		"COMBOBOX",
+	),
+)
+
+
+def _labelledContainerOf(obj):
+	"""The named field C{obj} sits in, if it sits in one.
+
+	Walks up only a few levels and stops at the window, so this cannot wander off into
+	the top of the application and read out a window title we have just silenced.
+	"""
+	parent = obj
+	for _step in range(4):
+		try:
+			parent = parent.parent
+		except Exception:
+			return None
+		if parent is None:
+			return None
+		role = getattr(parent, "role", None)
+		if role in _TRANSIENT_FOCUS_ROLES or role in _TITLE_ROLES:
+			return None
+		if role in _CONTAINER_ROLES and (getattr(parent, "name", "") or ""):
+			return parent
+	return None
+
+
+def _selectedItemName(obj):
+	"""The name of the selected child of C{obj}, when C{obj} is a small container.
+
+	Only for the case where the focus is the container itself. Where NVDA focuses the
+	item instead, which is what Outlook does with its message list and folder tree,
+	the item is the focus object and this is not needed.
+	"""
+	try:
+		if obj.role not in _CONTAINER_ROLES:
+			return None
+		count = obj.childCount
+	except Exception:
+		return None
+	if not count or count > _MAX_CHILDREN_SCANNED:
+		return None
+	selected = getattr(controlTypes.State, "SELECTED", None)
+	if selected is None:
+		return None
+	try:
+		for child in obj.children:
+			if selected in child.states and child.name:
+				return child.name
+	except Exception:
+		return None
+	return None
+
+
+def _briefFocusSpeech(obj):
+	"""A short description of the focus: the field, what it is, and what is in it."""
+	getProperties = getattr(speech, "getObjectPropertiesSpeech", None)
+	if getProperties is None:
+		return []
+	reason = getattr(controlTypes.OutputReason, "QUERY", None)
+	sequence = []
+	container = _labelledContainerOf(obj)
+	if container is not None:
+		sequence.extend(getProperties(container, reason=reason, name=True, role=True))
+	sequence.extend(
+		getProperties(
+			obj,
+			reason=reason,
+			name=True,
+			role=True,
+			value=True,
+			states=True,
+			positionInfo_indexInGroup=True,
+			positionInfo_similarItemsInGroup=True,
+		),
+	)
+	name = _selectedItemName(obj)
+	if name:
+		# Translators: Part of the brief report when switching to Microsoft Outlook.
+		sequence.append(_("{item} selected").format(item=name))
+	return sequence
+
+
+def _speakBriefFocus(sequence):
+	"""Say where the user has landed, past the add-on's own gate."""
+	with _ownSpeech():
+		speech.speak(sequence)
 
 
 ### Monkey patching
@@ -701,11 +959,17 @@ def _adoptOriginal(wrapper, original, name):
 			setattr(wrapper, flag, getattr(original, flag))
 
 
-def _hookGate(owner, name, inCall, after, chime=False, onlyIf=None, chimeCheck=None, post=None):
-	"""Hold the speech gate open across C{owner.name}.
+def _hookGate(owner, name, after, chime=False, onlyIf=None, chimeCheck=None, post=None):
+	"""Silence C{owner.name} while it runs, and for a moment afterwards.
 
-	@param inCall: seconds the gate is held while the call is on the stack.
-	@param after: seconds the gate is held once the call returns.
+	Speech is dropped by two separate mechanisms. While the call is on the stack a
+	depth counter silences everything, and that is the one that actually swallows the
+	document announcement, all of which NVDA speaks inline. Once the call returns only
+	the deadline gate is left, and that one stands down while a new window is being
+	announced, so it can never eat the announcement of the control the user just
+	switched to.
+
+	@param after: seconds the deadline gate is held once the call returns.
 	@param chime: play the ready tones on the way out, in "play tones" mode.
 	@param onlyIf: optional callable(self, args, kwargs) deciding whether this
 		particular call is one of the ones we silence. Checked before the original
@@ -721,11 +985,12 @@ def _hookGate(owner, name, inCall, after, chime=False, onlyIf=None, chimeCheck=N
 		mode = getMode()
 		silence = mode != MODE_NORMAL and (onlyIf is None or onlyIf(self, args, kwargs))
 		if silence:
-			_openGate(inCall)
+			_enterDocumentCall()
 		try:
 			return original(self, *args, **kwargs)
 		finally:
 			if silence:
+				_exitDocumentCall()
 				_openGate(after)
 				if chime and mode == MODE_TONES and (chimeCheck is None or chimeCheck(self, args, kwargs)):
 					_playReadyTones()
@@ -856,6 +1121,9 @@ def _onGesture(*args, **kwargs):
 	"""
 	if _gateUntil > 0.0:
 		_closeGate()
+	# The user is driving again, so there is no window announcement left to wait for.
+	# This also stops a cancelled announcement holding the gate down to its ceiling.
+	_endAnnouncement()
 	# A page summary that has not been spoken yet is now stale: the user has stopped
 	# waiting for the page and started using it.
 	_cancelSummary()
@@ -894,6 +1162,14 @@ def _addChoices(panel, sHelper):
 		choices=getSummaryModeLabels(),
 	)
 	panel._muteBrowseModeSummaryChoice.SetSelection(_selectionForSummaryMode(getSummaryMode()))
+	panel._muteBrowseModeLoadingCheckBox = sHelper.addItem(
+		wx.CheckBox(
+			panel,
+			# Translators: Label of a check box added to NVDA's Browse Mode settings.
+			label=_('Say "&loading complete" before the page summary'),
+		),
+	)
+	panel._muteBrowseModeLoadingCheckBox.SetValue(getAnnounceLoadingComplete())
 
 
 def _saveChoices(panel):
@@ -907,6 +1183,9 @@ def _saveChoices(panel):
 		index = choice.GetSelection()
 		if 0 <= index < len(SUMMARY_MODES):
 			setSummaryMode(SUMMARY_MODES[index])
+	checkBox = getattr(panel, "_muteBrowseModeLoadingCheckBox", None)
+	if checkBox is not None:
+		setAnnounceLoadingComplete(checkBox.IsChecked())
 
 
 def _refreshChoices(panel):
@@ -916,6 +1195,9 @@ def _refreshChoices(panel):
 	choice = getattr(panel, "_muteBrowseModeSummaryChoice", None)
 	if choice is not None:
 		choice.SetSelection(_selectionForSummaryMode(getSummaryMode()))
+	checkBox = getattr(panel, "_muteBrowseModeLoadingCheckBox", None)
+	if checkBox is not None:
+		checkBox.SetValue(getAnnounceLoadingComplete())
 
 
 def _makeSettingsWrapper(original):
@@ -926,8 +1208,9 @@ def _makeSettingsWrapper(original):
 		except Exception:
 			self._muteBrowseModeChoice = None
 			self._muteBrowseModeSummaryChoice = None
+			self._muteBrowseModeLoadingCheckBox = None
 			log.error(
-				"Mute Browse Mode: could not add the combo boxes to Browse Mode settings",
+				"Mute Browse Mode: could not add the controls to Browse Mode settings",
 				exc_info=True,
 			)
 
@@ -985,6 +1268,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		self._panelPatched = False
 		self._ownPanelAdded = False
 		self._gestureHandlerRegistered = False
+		#: Whether the window we switched away from was an Outlook one.
+		self._lastForegroundWasOutlook = False
+		#: Latest moment the focus landing in Outlook still counts as having just
+		#: arrived there. A deadline rather than a flag, so it cannot latch.
+		self._outlookArrivalUntil = 0.0
 
 		try:
 			# Gating speech itself, rather than each announcement, catches every route
@@ -1040,7 +1328,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 				browseMode.BrowseModeDocumentTreeInterceptor,
 				"event_gainFocus",
 				dict(
-					inCall=_IN_CALL_GATE,
 					after=_TRAILING_GATE,
 					chime=True,
 					onlyIf=_isEnteringDocument,
@@ -1053,14 +1340,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			(
 				browseMode.BrowseModeDocumentTreeInterceptor,
 				"event_treeInterceptor_gainFocus",
-				dict(inCall=_IN_CALL_GATE, after=_TRAILING_GATE, chime=True),
+				dict(after=_TRAILING_GATE, chime=True),
 			),
 			# A virtual buffer starting to load, which is what silences "Loading
 			# document...", and the point the page summary is owed from.
 			(
 				virtualBuffers.VirtualBuffer,
 				"loadBuffer",
-				dict(inCall=_LOAD_GATE, after=_LOAD_GATE, post=_armSummary),
+				dict(after=_LOAD_GATE, post=_armSummary),
 			),
 			# ...and finishing, which speaks "Refreshed" on a reload and is the moment
 			# both the chime and the page summary belong to.
@@ -1068,7 +1355,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 				virtualBuffers.VirtualBuffer,
 				"_loadBufferDone",
 				dict(
-					inCall=_IN_CALL_GATE,
 					after=_TRAILING_GATE,
 					chime=True,
 					chimeCheck=_loadSucceeded,
@@ -1125,6 +1411,55 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			except Exception:
 				log.error("Mute Browse Mode: could not hook %s.%s" % (owner.__name__, name), exc_info=True)
 
+	def event_foreground(self, obj, nextHandler):
+		"""A different window has come to the front: alt+tab, or anything like it.
+
+		Two things happen here. The deadline gate stands down until NVDA has finished
+		announcing the new window, so the title and the control the focus landed on are
+		never cut off. And if this is Outlook arriving from somewhere else, the focus
+		event that follows is answered with a brief description of where the user has
+		landed, in place of NVDA's own report.
+		"""
+		try:
+			isOutlook = _isOutlook(obj)
+			if getMode() != MODE_NORMAL:
+				# In normal mode nothing is being silenced, so there is nothing to
+				# stand down and no reason to touch NVDA's speech at all.
+				_beginAnnouncement()
+			if isOutlook and not self._lastForegroundWasOutlook and getMode() != MODE_NORMAL:
+				self._outlookArrivalUntil = time.monotonic() + _OUTLOOK_ARRIVAL_WINDOW
+				log.debug("Mute Browse Mode: Outlook is coming to the front")
+			self._lastForegroundWasOutlook = isOutlook
+		except Exception:
+			log.error("Mute Browse Mode: could not handle the foreground change", exc_info=True)
+		nextHandler()
+
+	def event_gainFocus(self, obj, nextHandler):
+		"""Describe where the focus landed, once Outlook has fully come to the front.
+
+		NVDA's own report still runs, silently, so its property caches and braille are
+		exactly as they would have been; only the speech is replaced. If the brief
+		report cannot be built, nothing is replaced and NVDA speaks as usual.
+		"""
+		if time.monotonic() < self._outlookArrivalUntil and _isOutlook(obj):
+			try:
+				role = getattr(obj, "role", None)
+				if role in _TRANSIENT_FOCUS_ROLES:
+					# Outlook has not settled on a real control yet. Keep waiting.
+					nextHandler()
+					return
+				sequence = _briefFocusSpeech(obj)
+			except Exception:
+				log.error("Mute Browse Mode: could not describe the Outlook focus", exc_info=True)
+				sequence = None
+			self._outlookArrivalUntil = 0.0
+			if sequence:
+				with _hardMute():
+					nextHandler()
+				_speakBriefFocus(sequence)
+				return
+		nextHandler()
+
 	def terminate(self):
 		_cancelSummary()
 		_resetGates()
@@ -1145,6 +1480,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		def speak(*args, **kwargs):
 			if getMode() != MODE_NORMAL and _isGated():
 				return
+			if _announcingNow():
+				# Let the announcement tell us when it has actually been said, rather
+				# than guessing how long a window title takes to read out.
+				try:
+					args, kwargs = _tagAnnouncement(args, kwargs)
+				except Exception:
+					log.debugWarning("Mute Browse Mode: could not tag the announcement", exc_info=True)
 			return original(*args, **kwargs)
 
 		speak.__name__ = "speak"

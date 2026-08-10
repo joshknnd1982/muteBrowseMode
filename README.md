@@ -38,8 +38,39 @@ announcement the combo box above silenced.
 | Play tones | The three ascending tones instead of the summary. If the combo box above is also set to tones, you still only hear them once. |
 | Normal | No summary. |
 
+### Say "loading complete" before the page summary
+
+A check box under the two combo boxes, ticked by default. Untick it and the summary is
+just "Page has 8 regions, 57 headings and 196 links".
+
 Both combo boxes also have a cycle command in the Input Gestures dialog under
 "Mute Browse Mode", with no gesture assigned by default.
+
+## Switching windows
+
+Nothing is silenced while NVDA is announcing a window you have just switched to. The
+window title and the control the focus landed on are read right to the end, and only
+then does the silencing resume. The browse mode document itself stays silent
+throughout, which is the whole point of the add-on.
+
+"Read right to the end" is the synthesiser's word for it rather than a guess at how
+long a title takes: a `speech.commands.CallbackCommand` is appended to each utterance
+of the announcement, and NVDA runs it when speech actually reaches that point. Pressing
+a key ends the wait early, and a ceiling of eight seconds ends it whatever happens, so
+a cancelled announcement can never leave the add-on switched off.
+
+## Switching to Microsoft Outlook
+
+Arriving in Outlook from another program answers with a brief description of where you
+have landed — the field, the focus, what is in it, and where it sits:
+
+> Inbox, list, Josh Kennedy build 1.4, list item, 3 of 57
+
+Where the focus is a control holding a choice, such as a combo box, the selected item
+is included. This **replaces** NVDA's own report rather than adding to it, so nothing
+is said twice: NVDA's report still runs, silently, so braille and NVDA's property
+caches are untouched. It only fires when Outlook was not already the foreground
+program, and only when the mute browse mode combo box is not on Normal.
 
 ## Where the summary happens
 
@@ -109,13 +140,22 @@ NVDA+t for the title, NVDA+tab for the focus and NVDA+b for a whole dialog all u
 python build.py
 ```
 
-That writes `muteBrowseMode-1.3.nvda-addon` next to `build.py`. Open it to install,
+That writes `muteBrowseMode-1.4.nvda-addon` next to `build.py`. Open it to install,
 or drag it onto NVDA.
 
 ## How it works
 
-`speech.speech.speak` is wrapped with a gate, and the gate is held open across the
-four separate points in NVDA where a document gets announced. They are genuinely
+`speech.speech.speak` is wrapped with a gate, and the gate is held shut across the
+four separate points in NVDA where a document gets announced.
+
+There are two of them. While a hooked call is on the stack a **depth counter** silences
+everything, and that is the one that actually swallows the document announcement —
+NVDA speaks all of it inline, so being inside the call is enough. Once the call
+returns only the **deadline gate** is left, and that one stands down while a new window
+is being announced. `eventHandler.doPreGainFocus` runs `foreground`, then
+`focusEntered` for the window title, then `event_treeInterceptor_gainFocus` for the
+document, then `gainFocus` for the control; splitting the gate this way is what lets
+the first and last through while still silencing the middle one. They are genuinely
 separate: silencing the document load does not silence the Outlook message, because
 NVDA does not read an Outlook message as part of a load.
 
