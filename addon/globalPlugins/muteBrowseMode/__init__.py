@@ -38,6 +38,7 @@ here suppresses speech only, and the calls that would have spoken still run, so
 braille, vision and NVDA's own caches carry on as usual.
 """
 
+import ctypes
 import time
 
 import addonHandler
@@ -101,6 +102,7 @@ config.conf.spec[CONF_SECTION] = {
 	"mode": 'option("silence", "tones", "normal", default="normal")',
 	"pageSummary": 'option("speak", "tones", "normal", default="speak")',
 	"announceLoadingComplete": "boolean(default=True)",
+	"linksOnOwnLine": "boolean(default=False)",
 }
 
 
@@ -162,6 +164,17 @@ def getAnnounceLoadingComplete():
 
 def setAnnounceLoadingComplete(enabled):
 	config.conf[CONF_SECTION]["announceLoadingComplete"] = bool(enabled)
+
+
+def getLinksOnOwnLine():
+	try:
+		return bool(config.conf[CONF_SECTION]["linksOnOwnLine"])
+	except Exception:
+		return False
+
+
+def setLinksOnOwnLine(enabled):
+	config.conf[CONF_SECTION]["linksOnOwnLine"] = bool(enabled)
 
 
 ### The applications we treat specially
@@ -957,11 +970,21 @@ def _speakBriefFocus(sequence):
 
 ### The Outlook message body
 
-#: Window classes that are only ever the Word editing surface Outlook composes a
-#: message in. Deliberately not "RichEdit20W": NVDA's own Outlook support treats every
-#: window whose class starts with that as a contact edit field, which is what To, Cc
-#: and Subject are, so matching on it announced the message body for all of them.
-_OUTLOOK_BODY_WINDOW_CLASSES = frozenset(("_WwG", "_WwB"))
+#: The window class of the Word editing surface Outlook composes a message in, and the
+#: only one that is a message body.
+#:
+#: Deliberately not "RichEdit20W": NVDA's own Outlook support treats every window whose
+#: class starts with that as a contact edit field, which is what To, Cc and Subject are,
+#: so matching on it announced the message body for all of them.
+#:
+#: Deliberately narrow for the other direction too. Word puts an editing surface inside
+#: its dialogs as well, which NVDA has a class of its own for, ``WordDocument_WwN``, and
+#: in Outlook those pick up exactly the same message body markings as the real thing.
+#: The box showing the misspelled word in the F7 spelling dialog is one of them, which
+#: is why it announced the message body when it took the focus. Requiring the editing
+#: surface itself keeps every one of them out, whatever window class it turns out to
+#: have, because none of them can be the document window.
+_OUTLOOK_BODY_WINDOW_CLASSES = frozenset(("_WwG",))
 
 #: The one RichEdit control in Outlook that is a message body rather than a field:
 #: the plain text message, which NVDA identifies by exactly this class and id.
@@ -993,11 +1016,12 @@ def _isOutlookMessageBody(obj):
 	that loose ends up announcing the message body for the lot of them. What is needed
 	is a positive identification of the body itself, and there are three:
 
-	* NVDA's own Outlook support puts C{isReadonlyViewer} on the message body object
-	  and on nothing else, so having that attribute at all is the identification, and
-	  its value says whether this is a message being written or one being read;
-	* the Word editing surface Outlook composes in has a window class of its own,
-	  which no field on the form shares;
+	* NVDA's own Outlook support puts C{isReadonlyViewer} on the message body object,
+	  and its value says whether this is a message being written or one being read.
+	  It is not enough on its own, because Word hands the same kind of object to its
+	  dialogs, so the object also has to be the editing surface itself;
+	* that editing surface has a window class of its own, which no field on the form
+	  and no Word dialog shares;
 	* the plain text body is the one RichEdit control NVDA picks out by control id.
 
 	A body the user cannot type into, such as the one in the reading pane, is never
@@ -1014,11 +1038,13 @@ def _isOutlookMessageBody(obj):
 	if _hasState(states, _STATE_READONLY) or _hasState(states, _STATE_UNAVAILABLE):
 		return False
 
+	windowClass = _windowClassOf(obj)
 	viewer = getattr(obj, "isReadonlyViewer", None)
 	if viewer is not None:
-		# An Outlook message body, and NVDA has already worked out which kind.
-		return not viewer
-	windowClass = _windowClassOf(obj)
+		# A Word surface Outlook has marked up as a message. Only the editing surface
+		# itself is the body; the same marking is on the one inside the F7 spelling
+		# dialog and every other Word dialog.
+		return not viewer and windowClass in _OUTLOOK_BODY_WINDOW_CLASSES
 	if windowClass in _OUTLOOK_BODY_WINDOW_CLASSES:
 		return True
 	if (
@@ -1038,6 +1064,94 @@ def _announceMessageBody():
 	# Translators: Announced when the focus reaches the message body in Microsoft Outlook.
 	with _ownSpeech():
 		ui.message(_("You are now in the message body, type a message."))
+
+
+### Putting links on their own line in Outlook
+
+# NVDA already does this in a web browser: Browse Mode settings, "Use screen layout
+# (when supported)". With it off, a link or a button that shares a line with other
+# things on screen gets a line of its own in browse mode, so down arrow reaches each of
+# them in turn. The setting is read in exactly one place, VirtualBufferTextInfo._
+# getLineOffsets, and passed straight to the code that works out where a line starts
+# and ends, so an Outlook message that is rendered as a web document can be given the
+# same treatment on its own without touching the setting the browsers use.
+#
+# An Outlook message that Word renders instead is not a virtual buffer at all, and NVDA
+# has no equivalent for it: the base implementation of the command that toggles this
+# answers "not supported in this document". Nothing can be done there from here, so it
+# says so in the log rather than quietly doing nothing.
+
+#: Whether the "Word renders this one" note has already been logged this session.
+_wordLayoutNoted = False
+
+
+def _isVirtualBufferOutlookMessage(textInfo):
+	"""Whether this text is an Outlook message rendered as a web document."""
+	buffer = getattr(textInfo, "obj", None)
+	if buffer is None or not getattr(buffer, "VBufHandle", None):
+		return False
+	return _isOutlook(getattr(buffer, "rootNVDAObject", None))
+
+
+def _shouldSplitLines(textInfo):
+	"""Whether this line should be broken up so each control gets one of its own."""
+	if not getLinksOnOwnLine():
+		return False
+	try:
+		if not config.conf["virtualBuffers"]["useScreenLayout"]:
+			# NVDA is already doing it everywhere, so there is nothing to add.
+			return False
+	except Exception:
+		pass
+	return _isVirtualBufferOutlookMessage(textInfo)
+
+
+def _noteWordRenderedMessage(treeInterceptor):
+	"""Say in the log why an Outlook message cannot have its links split up."""
+	global _wordLayoutNoted
+	if _wordLayoutNoted or not getLinksOnOwnLine():
+		return
+	if getattr(treeInterceptor, "VBufHandle", None):
+		return
+	if not _isOutlook(getattr(treeInterceptor, "rootNVDAObject", None)):
+		return
+	_wordLayoutNoted = True
+	log.info(
+		"Mute Browse Mode: this Outlook message is rendered by Word rather than as a "
+		"web document, so NVDA has no screen layout to switch off and links cannot be "
+		"put on their own line.",
+	)
+
+
+def _makeLineOffsetsWrapper(original):
+	"""Work out a line as if screen layout were off, for Outlook messages only."""
+
+	def _getLineOffsets(self, offset):
+		try:
+			split = _shouldSplitLines(self)
+		except Exception:
+			split = False
+		if not split:
+			return original(self, offset)
+		try:
+			import NVDAHelper
+
+			lineStart = ctypes.c_int()
+			lineEnd = ctypes.c_int()
+			NVDAHelper.localLib.VBuf_getLineOffsets(
+				self.obj.VBufHandle,
+				offset,
+				config.conf["virtualBuffers"]["maxLineLength"],
+				False,
+				ctypes.byref(lineStart),
+				ctypes.byref(lineEnd),
+			)
+			return lineStart.value, lineEnd.value
+		except Exception:
+			log.debugWarning("Mute Browse Mode: could not split the line", exc_info=True)
+			return original(self, offset)
+
+	return _getLineOffsets
 
 
 ### Monkey patching
@@ -1182,6 +1296,11 @@ def _summaryAfterDocumentLoad(buffer, args, kwargs):
 	_scheduleSummary(buffer)
 
 
+def _noteLayoutOnEntry(treeInterceptor, args, kwargs):
+	"""event_treeInterceptor_gainFocus: note a message no line splitting can reach."""
+	_noteWordRenderedMessage(treeInterceptor)
+
+
 def _isEnteringDocument(self, args, kwargs):
 	"""True when a browse mode focus event is focus arriving from outside the document.
 
@@ -1304,6 +1423,14 @@ def _addChoices(panel, sHelper):
 		),
 	)
 	panel._muteBrowseModeLoadingCheckBox.SetValue(getAnnounceLoadingComplete())
+	panel._muteBrowseModeLinksCheckBox = sHelper.addItem(
+		wx.CheckBox(
+			panel,
+			# Translators: Label of a check box added to NVDA's Browse Mode settings.
+			label=_("Links are on their &own line"),
+		),
+	)
+	panel._muteBrowseModeLinksCheckBox.SetValue(getLinksOnOwnLine())
 
 
 def _saveChoices(panel):
@@ -1320,6 +1447,9 @@ def _saveChoices(panel):
 	checkBox = getattr(panel, "_muteBrowseModeLoadingCheckBox", None)
 	if checkBox is not None:
 		setAnnounceLoadingComplete(checkBox.IsChecked())
+	checkBox = getattr(panel, "_muteBrowseModeLinksCheckBox", None)
+	if checkBox is not None:
+		setLinksOnOwnLine(checkBox.IsChecked())
 
 
 def _refreshChoices(panel):
@@ -1332,6 +1462,9 @@ def _refreshChoices(panel):
 	checkBox = getattr(panel, "_muteBrowseModeLoadingCheckBox", None)
 	if checkBox is not None:
 		checkBox.SetValue(getAnnounceLoadingComplete())
+	checkBox = getattr(panel, "_muteBrowseModeLinksCheckBox", None)
+	if checkBox is not None:
+		checkBox.SetValue(getLinksOnOwnLine())
 
 
 def _makeSettingsWrapper(original):
@@ -1343,6 +1476,7 @@ def _makeSettingsWrapper(original):
 			self._muteBrowseModeChoice = None
 			self._muteBrowseModeSummaryChoice = None
 			self._muteBrowseModeLoadingCheckBox = None
+			self._muteBrowseModeLinksCheckBox = None
 			log.error(
 				"Mute Browse Mode: could not add the controls to Browse Mode settings",
 				exc_info=True,
@@ -1482,7 +1616,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			(
 				browseMode.BrowseModeDocumentTreeInterceptor,
 				"event_treeInterceptor_gainFocus",
-				dict(after=_TRAILING_GATE, chime=True),
+				dict(after=_TRAILING_GATE, chime=True, post=_noteLayoutOnEntry),
 			),
 			# A virtual buffer starting to load, which is what silences "Loading
 			# document...", and the point the page summary is owed from.
@@ -1516,6 +1650,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			_hookAfter(virtualBuffers.VirtualBuffer, "event_documentLoadComplete", _summaryAfterDocumentLoad)
 		except Exception:
 			log.error("Mute Browse Mode: could not hook event_documentLoadComplete", exc_info=True)
+
+		# Where a line starts and ends, so that an Outlook message can put each of its
+		# links and buttons on a line of its own.
+		try:
+			textInfo = virtualBuffers.VirtualBufferTextInfo
+			_patch(textInfo, "_getLineOffsets", _makeLineOffsetsWrapper(textInfo._getLineOffsets))
+		except Exception:
+			log.error("Mute Browse Mode: could not hook _getLineOffsets", exc_info=True)
 
 	def _installNoiseHooks(self):
 		"""Live regions and alerts, silenced in Outlook and Chromium only.

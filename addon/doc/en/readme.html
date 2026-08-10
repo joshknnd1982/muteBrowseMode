@@ -61,6 +61,22 @@ box is set to play tones as well, you still only hear them once.</p>
 8 regions, 57 headings and 196 links", with no "Loading complete" in front of it. It
 is ticked to start with.</p>
 
+<h3>Links are on their own line</h3>
+
+<p>A check box, not ticked to start with. Tick it and a message in Outlook puts every
+link, button and other control on a line of its own, so you can down arrow through them
+one at a time.</p>
+
+<p>This is the same thing NVDA's own "Use screen layout (when supported)" does in a web
+browser, applied to Outlook on its own, so the setting your browsers use is not touched.
+If you already have NVDA's screen layout switched off, the check box has nothing to add.</p>
+
+<p>It reaches a message that Outlook renders as a web document: Outlook on the web, the
+new Outlook for Windows, and messages classic Outlook shows through its web control. A
+message that Word renders instead is not a web document at all, and NVDA has no screen
+layout to switch off there, so nothing can change it. When that happens the add-on
+writes a line to NVDA's log saying so, rather than quietly doing nothing.</p>
+
 <h2>Switching windows</h2>
 
 <p>Nothing is ever silenced while NVDA is announcing a window you have just switched
@@ -119,11 +135,12 @@ there, NVDA now says:</p>
 <p>It is said after NVDA's own announcement of the field, and only for the message body
 itself. Nearly everything on a message form is an editable field, so "can this be
 typed into" is not the test. The body is identified instead: NVDA marks the message
-body object as such and nothing else on the form that way, the editor Outlook composes
-in has a window of its own that no field shares, and the plain text body is the one
-rich edit control NVDA picks out by name and number. A body that cannot be typed into,
-such as the one in the reading pane, is left alone, because the announcement invites
-you to type.</p>
+body object as such, the editor Outlook composes in has a window of its own that no
+field and no dialog shares, and the plain text body is the one rich edit control NVDA
+picks out by name and number. The box in the F7 spelling dialog is left alone as well,
+even though Word marks it up the same way, because it is not that editing window. A
+body that cannot be typed into, such as the one in the reading pane, is left alone too,
+because the announcement invites you to type.</p>
 
 <p>Tabbing away and back says it again; a message body raising a second focus event on
 its own does not. Like the rest of the Outlook behaviour, it is quiet when the first
@@ -212,6 +229,17 @@ happens.</li>
 </ul>
 
 <h2>Changes</h2>
+
+<h3>1.7</h3>
+<ul>
+<li>Fixed "You are now in the message body" being said when the F7 spelling dialog took
+the focus. Word puts an editing surface inside its dialogs, and in Outlook those pick up
+exactly the same message body markings as the real thing. The message body now has to be
+the editing window itself, which no dialog can be.</li>
+<li>Added a "Links are on their own line" check box to Browse Mode settings. When
+ticked, a message in Outlook puts every link, button and other control on a line of its
+own, the same way NVDA's own screen layout setting does in a web browser.</li>
+</ul>
 
 <h3>1.6</h3>
 <ul>

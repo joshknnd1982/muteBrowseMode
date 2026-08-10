@@ -43,6 +43,27 @@ announcement the combo box above silenced.
 A check box under the two combo boxes, ticked by default. Untick it and the summary is
 just "Page has 8 regions, 57 headings and 196 links".
 
+### Links are on their own line
+
+A check box, unticked by default. When ticked, an Outlook message puts each link,
+button and other control on a line of its own, so down arrow reaches them one at a
+time.
+
+This is what NVDA's own **Use screen layout (when supported)** does in a web browser,
+and it is the same machinery: `useScreenLayout` is read in exactly one place,
+`VirtualBufferTextInfo._getLineOffsets`, and passed straight to `VBuf_getLineOffsets`.
+The add-on wraps that one method and asks for the line as if screen layout were off,
+but only for an Outlook message, so the setting your browsers use is never touched. If
+NVDA's screen layout is already off, the check box has nothing to add and stays out of
+the way.
+
+**It only reaches a message Outlook renders as a web document** — Outlook on the web,
+the new Outlook for Windows, and messages classic Outlook shows through
+`Internet Explorer_Server`. A message rendered by Word is not a virtual buffer at all,
+and NVDA has no equivalent there: the base implementation of `script_toggleScreenLayout`
+answers "Not supported in this document." When that happens the add-on writes one line
+to NVDA's log saying so, rather than quietly doing nothing.
+
 Both combo boxes also have a cycle command in the Input Gestures dialog under
 "Mute Browse Mode", with no gesture assigned by default.
 
@@ -119,13 +140,17 @@ Only for the message body itself. Nearly everything on a message form is editabl
 Outlook's recipient fields wrap, so they are multiline rich edit controls too. The body
 is identified positively instead, by any of:
 
-- **`obj.isReadonlyViewer`** — NVDA's `appModules/outlook.py` puts this on the message
-  body object (`BaseOutlookWordDocument`) and on nothing else, so its mere presence is
-  the identification, and its value says whether the message is being written or read.
-- **window class `_WwG` / `_WwB`** — the Word editing surface Outlook composes in. No
-  field on the form shares it. Deliberately *not* `RichEdit20W`: NVDA classes every
-  window whose class starts with that as a `ContactEditField`, which is what To, Cc and
-  Subject are.
+- **`obj.isReadonlyViewer` on a `_WwG` window** — NVDA's `appModules/outlook.py` puts
+  `isReadonlyViewer` on the message body object (`BaseOutlookWordDocument`), and its
+  value says whether the message is being written or read. It is not enough on its own:
+  Word hands the same kind of object to its dialogs, and NVDA has a class for exactly
+  that (`WordDocument_WwN`), so the F7 spelling dialog's "Not in Dictionary" box picked
+  up the same markings as the real body. Requiring `_WwG`, the editing surface itself,
+  keeps every Word dialog out, whatever window class it turns out to have, because none
+  of them can be the document window.
+- **window class `_WwG`** — the Word editing surface Outlook composes in. No field on
+  the form shares it. Deliberately *not* `RichEdit20W`: NVDA classes every window whose
+  class starts with that as a `ContactEditField`, which is what To, Cc and Subject are.
 - **`RichEdit20W` with control id 8224** — the one rich edit control that is a body,
   which is how NVDA itself picks out the plain text message.
 - a web-view Outlook body, which has none of the above, needs both a name saying it is
@@ -205,7 +230,7 @@ NVDA+t for the title, NVDA+tab for the focus and NVDA+b for a whole dialog all u
 python build.py
 ```
 
-That writes `muteBrowseMode-1.6.nvda-addon` next to `build.py`. Open it to install,
+That writes `muteBrowseMode-1.7.nvda-addon` next to `build.py`. Open it to install,
 or drag it onto NVDA.
 
 ## How it works
