@@ -47,11 +47,13 @@ import browseMode
 import config
 import controlTypes
 import core
+import cursorManager
 import globalPluginHandler
 import inputCore
 import scriptHandler
 import speech
 import speech.speech
+import textInfos
 import tones
 import ui
 import virtualBuffers
@@ -1081,8 +1083,25 @@ def _announceMessageBody():
 # answers "not supported in this document". Nothing can be done there from here, so it
 # says so in the log rather than quietly doing nothing.
 
-#: Whether the "Word renders this one" note has already been logged this session.
-_wordLayoutNoted = False
+#: The controls that earn a line of their own. Text either side of one gets a line of
+#: its own too, which is what makes the link the only thing on its line.
+_SPLIT_CONTROL_ROLES = _members(
+	controlTypes.Role,
+	(
+		"LINK",
+		"BUTTON",
+		"TOGGLEBUTTON",
+		"MENUBUTTON",
+		"DROPDOWNBUTTON",
+		"SPLITBUTTON",
+		"CHECKBOX",
+		"RADIOBUTTON",
+		"COMBOBOX",
+		"EDITABLETEXT",
+		"SLIDER",
+		"SPINBUTTON",
+	),
+)
 
 
 def _isVirtualBufferOutlookMessage(textInfo):
@@ -1104,23 +1123,6 @@ def _shouldSplitLines(textInfo):
 	except Exception:
 		pass
 	return _isVirtualBufferOutlookMessage(textInfo)
-
-
-def _noteWordRenderedMessage(treeInterceptor):
-	"""Say in the log why an Outlook message cannot have its links split up."""
-	global _wordLayoutNoted
-	if _wordLayoutNoted or not getLinksOnOwnLine():
-		return
-	if getattr(treeInterceptor, "VBufHandle", None):
-		return
-	if not _isOutlook(getattr(treeInterceptor, "rootNVDAObject", None)):
-		return
-	_wordLayoutNoted = True
-	log.info(
-		"Mute Browse Mode: this Outlook message is rendered by Word rather than as a "
-		"web document, so NVDA has no screen layout to switch off and links cannot be "
-		"put on their own line.",
-	)
 
 
 def _makeLineOffsetsWrapper(original):
@@ -1152,6 +1154,190 @@ def _makeLineOffsetsWrapper(original):
 			return original(self, offset)
 
 	return _getLineOffsets
+
+
+### ...and the same thing where there is no buffer to do it for us
+#
+# An Outlook message that Word renders is not a virtual buffer, and NVDA has no screen
+# layout for it: the base implementation of the command that toggles that answers "not
+# supported in this document". Its lines are Word's own, so a link sitting in the middle
+# of a sentence is read out as part of that sentence and down arrow steps straight over
+# it.
+#
+# Redefining what a line is would reach much too far: NVDA uses the line unit for
+# braille, for reporting the line the focus lands on, and for say all. So instead only
+# the down and up arrow scripts are wrapped, and only for this one kind of document.
+# They walk the line in segments, split where a control starts and ends, so the link is
+# on its own and the words either side of it are too. Everything else about the document
+# is left exactly as NVDA has it, and any difficulty falls straight back to NVDA's own
+# line movement.
+
+
+def _shouldWalkSegments(treeInterceptor):
+	"""Whether down and up arrow should step through this document in segments."""
+	if not getLinksOnOwnLine():
+		return False
+	if not isinstance(treeInterceptor, browseMode.BrowseModeDocumentTreeInterceptor):
+		return False
+	if getattr(treeInterceptor, "passThrough", False):
+		# Focus mode: the arrows belong to the application.
+		return False
+	if getattr(treeInterceptor, "VBufHandle", None):
+		# A web document, where the line offsets above have already done the job.
+		return False
+	return _isOutlook(getattr(treeInterceptor, "rootNVDAObject", None))
+
+
+def _isSplittableControl(field):
+	try:
+		return field.get("role") in _SPLIT_CONTROL_ROLES
+	except Exception:
+		return False
+
+
+def _lineSegments(lineInfo):
+	"""Where C{lineInfo} should be broken up, as a list of (start, end) character pairs.
+
+	The boundaries are the places a control starts and finishes, so a line reading
+	"comment this is a link more words" comes back as three segments: the words before
+	the link, the link, and the words after it.
+	"""
+	try:
+		fields = lineInfo.getTextWithFields()
+	except Exception:
+		log.debugWarning("Mute Browse Mode: could not read the line's controls", exc_info=True)
+		return None
+	offset = 0
+	stack = []
+	edges = set()
+	for field in fields:
+		if isinstance(field, str):
+			offset += len(field)
+			continue
+		command = getattr(field, "command", None)
+		if command == "controlStart":
+			stack.append((offset, _isSplittableControl(getattr(field, "field", None))))
+		elif command == "controlEnd" and stack:
+			start, splittable = stack.pop()
+			if splittable and offset > start:
+				edges.add(start)
+				edges.add(offset)
+	total = offset
+	if total <= 0:
+		# A blank line has nothing to split. NVDA's own movement handles those.
+		return None
+	whole = [(0, total)]
+	if not edges:
+		return whole
+	edges.update((0, total))
+	bounds = sorted(edge for edge in edges if 0 <= edge <= total)
+	text = lineInfo.text or ""
+	segments = [
+		(start, end)
+		for start, end in zip(bounds, bounds[1:])
+		if end > start and text[start:end].strip()
+	]
+	return segments or whole
+
+
+def _segmentInfo(lineInfo, start, end):
+	"""A copy of C{lineInfo} narrowed to the characters between C{start} and C{end}."""
+	segment = lineInfo.copy()
+	segment.collapse()
+	if start and segment.move(textInfos.UNIT_CHARACTER, start) != start:
+		return None
+	finish = lineInfo.copy()
+	finish.collapse()
+	if end and finish.move(textInfos.UNIT_CHARACTER, end) != end:
+		return None
+	segment.setEndPoint(finish, "endToStart")
+	return segment
+
+
+def _caretOffsetInLine(lineInfo, caretInfo):
+	prefix = lineInfo.copy()
+	prefix.setEndPoint(caretInfo, "endToStart")
+	return len(prefix.text or "")
+
+
+def _walkSegment(treeInterceptor, gesture, direction):
+	"""Move to the next or previous segment. False means "let NVDA do it instead"."""
+	caret = treeInterceptor.makeTextInfo(textInfos.POSITION_CARET)
+	line = caret.copy()
+	line.expand(textInfos.UNIT_LINE)
+	segments = _lineSegments(line)
+	target = None
+	if segments:
+		here = _caretOffsetInLine(line, caret)
+		index = 0
+		for position, (start, _end) in enumerate(segments):
+			if start <= here:
+				index = position
+		wanted = index + direction
+		if 0 <= wanted < len(segments):
+			target = _segmentInfo(line, *segments[wanted])
+	if target is None:
+		# Nothing left on this line, so take the next one and start at its near end.
+		line = caret.copy()
+		line.expand(textInfos.UNIT_LINE)
+		line.collapse()
+		if line.move(textInfos.UNIT_LINE, direction) == 0:
+			return False
+		line.expand(textInfos.UNIT_LINE)
+		segments = _lineSegments(line)
+		if not segments:
+			return False
+		target = _segmentInfo(line, *(segments[0] if direction > 0 else segments[-1]))
+	if target is None:
+		return False
+	selection = target.copy()
+	selection.collapse()
+	# Spoken before the selection moves, the way NVDA does it: moving the selection can
+	# move the focus, and that can leave the text we are about to speak behind.
+	willResume = False
+	try:
+		willResume = scriptHandler.willSayAllResume(gesture)
+	except Exception:
+		pass
+	if not willResume:
+		speech.speakTextInfo(
+			target,
+			unit=textInfos.UNIT_LINE,
+			reason=controlTypes.OutputReason.CARET,
+		)
+	try:
+		treeInterceptor.selection = selection
+	except Exception:
+		# Spoken already, so the move must still count as done: letting NVDA's own
+		# movement run now would say the next thing twice.
+		log.error("Mute Browse Mode: could not move to the segment", exc_info=True)
+	return True
+
+
+def _makeMoveByLineWrapper(original, direction):
+	def script_moveByLine(self, gesture):
+		try:
+			walk = _shouldWalkSegments(self)
+		except Exception:
+			walk = False
+		if not walk:
+			return original(self, gesture)
+		try:
+			if scriptHandler.isScriptWaiting():
+				# Keys are backed up. NVDA drops the move rather than falling behind,
+				# and so must we, or holding the arrow down would speak twice per press.
+				return
+			if _walkSegment(self, gesture, direction):
+				return
+		except Exception:
+			log.error("Mute Browse Mode: could not walk the line in segments", exc_info=True)
+		return original(self, gesture)
+
+	script_moveByLine.__name__ = getattr(original, "__name__", "script_moveByLine")
+	script_moveByLine.__doc__ = getattr(original, "__doc__", None)
+	# resumeSayAllMode and anything else scriptHandler reads off the script.
+	script_moveByLine.__dict__.update(getattr(original, "__dict__", {}))
+	return script_moveByLine
 
 
 ### Monkey patching
@@ -1294,11 +1480,6 @@ def _summaryAfterLoad(buffer, args, kwargs):
 def _summaryAfterDocumentLoad(buffer, args, kwargs):
 	"""event_documentLoadComplete: the second chance for a buffer that loaded empty."""
 	_scheduleSummary(buffer)
-
-
-def _noteLayoutOnEntry(treeInterceptor, args, kwargs):
-	"""event_treeInterceptor_gainFocus: note a message no line splitting can reach."""
-	_noteWordRenderedMessage(treeInterceptor)
 
 
 def _isEnteringDocument(self, args, kwargs):
@@ -1616,7 +1797,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			(
 				browseMode.BrowseModeDocumentTreeInterceptor,
 				"event_treeInterceptor_gainFocus",
-				dict(after=_TRAILING_GATE, chime=True, post=_noteLayoutOnEntry),
+				dict(after=_TRAILING_GATE, chime=True),
 			),
 			# A virtual buffer starting to load, which is what silences "Loading
 			# document...", and the point the page summary is owed from.
@@ -1651,13 +1832,25 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		except Exception:
 			log.error("Mute Browse Mode: could not hook event_documentLoadComplete", exc_info=True)
 
-		# Where a line starts and ends, so that an Outlook message can put each of its
-		# links and buttons on a line of its own.
+		# Where a line starts and ends, so that an Outlook message rendered as a web
+		# document can put each of its links and buttons on a line of its own.
 		try:
-			textInfo = virtualBuffers.VirtualBufferTextInfo
-			_patch(textInfo, "_getLineOffsets", _makeLineOffsetsWrapper(textInfo._getLineOffsets))
+			bufferText = virtualBuffers.VirtualBufferTextInfo
+			_patch(bufferText, "_getLineOffsets", _makeLineOffsetsWrapper(bufferText._getLineOffsets))
 		except Exception:
 			log.error("Mute Browse Mode: could not hook _getLineOffsets", exc_info=True)
+
+		# ...and the arrow keys, for an Outlook message rendered by Word, which has no
+		# buffer and so no line offsets to work out.
+		for name, direction in (
+			("script_moveByLine_forward", 1),
+			("script_moveByLine_back", -1),
+		):
+			try:
+				manager = cursorManager.CursorManager
+				_patch(manager, name, _makeMoveByLineWrapper(getattr(manager, name), direction))
+			except Exception:
+				log.error("Mute Browse Mode: could not hook %s" % name, exc_info=True)
 
 	def _installNoiseHooks(self):
 		"""Live regions and alerts, silenced in Outlook and Chromium only.

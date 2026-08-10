@@ -49,20 +49,35 @@ A check box, unticked by default. When ticked, an Outlook message puts each link
 button and other control on a line of its own, so down arrow reaches them one at a
 time.
 
-This is what NVDA's own **Use screen layout (when supported)** does in a web browser,
-and it is the same machinery: `useScreenLayout` is read in exactly one place,
-`VirtualBufferTextInfo._getLineOffsets`, and passed straight to `VBuf_getLineOffsets`.
-The add-on wraps that one method and asks for the line as if screen layout were off,
-but only for an Outlook message, so the setting your browsers use is never touched. If
-NVDA's screen layout is already off, the check box has nothing to add and stays out of
-the way.
+Outlook renders messages two completely different ways, and each needs its own answer.
 
-**It only reaches a message Outlook renders as a web document** — Outlook on the web,
-the new Outlook for Windows, and messages classic Outlook shows through
-`Internet Explorer_Server`. A message rendered by Word is not a virtual buffer at all,
-and NVDA has no equivalent there: the base implementation of `script_toggleScreenLayout`
-answers "Not supported in this document." When that happens the add-on writes one line
-to NVDA's log saying so, rather than quietly doing nothing.
+**A message rendered as a web document** — Outlook on the web, the new Outlook for
+Windows, and messages classic Outlook shows through `Internet Explorer_Server` — is a
+virtual buffer, so NVDA's own **Use screen layout (when supported)** already covers it.
+That setting is read in exactly one place, `VirtualBufferTextInfo._getLineOffsets`, and
+passed straight to `VBuf_getLineOffsets`, which breaks the line at any node with
+children when it is off. The add-on wraps that one method and asks for the line as if
+screen layout were off, but only for an Outlook message, so the setting your browsers
+use is never touched. If NVDA's screen layout is already off, this has nothing to add
+and stays out of the way.
+
+**A message rendered by Word** — which is what classic Outlook does by default — is not
+a virtual buffer at all, and NVDA has nothing equivalent: the base implementation of
+`script_toggleScreenLayout` answers "Not supported in this document." Its lines are
+Word's own, so a link in the middle of a sentence is read as part of that sentence and
+down arrow steps straight over it.
+
+Redefining the line unit would reach far too much — NVDA uses `UNIT_LINE` for braille,
+for reporting the line the focus lands on, and elsewhere. So only
+`CursorManager.script_moveByLine_forward` and `script_moveByLine_back` are wrapped, and
+only for this one kind of document. They walk the line in segments split where a control
+starts and ends, so the link is on its own and the words either side of it are too:
+
+> "comment this is a link" → down arrow → "comment " → down arrow → "this is a link"
+
+Everything else about the document is left exactly as NVDA has it, and any difficulty at
+all falls straight back to NVDA's own line movement. `resumeSayAllMode` is carried onto
+the wrappers, so say all still resumes from an arrow key.
 
 Both combo boxes also have a cycle command in the Input Gestures dialog under
 "Mute Browse Mode", with no gesture assigned by default.
@@ -230,7 +245,7 @@ NVDA+t for the title, NVDA+tab for the focus and NVDA+b for a whole dialog all u
 python build.py
 ```
 
-That writes `muteBrowseMode-1.7.nvda-addon` next to `build.py`. Open it to install,
+That writes `muteBrowseMode-1.8.nvda-addon` next to `build.py`. Open it to install,
 or drag it onto NVDA.
 
 ## How it works

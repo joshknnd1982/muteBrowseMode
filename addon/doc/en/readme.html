@@ -67,15 +67,25 @@ is ticked to start with.</p>
 link, button and other control on a line of its own, so you can down arrow through them
 one at a time.</p>
 
-<p>This is the same thing NVDA's own "Use screen layout (when supported)" does in a web
-browser, applied to Outlook on its own, so the setting your browsers use is not touched.
-If you already have NVDA's screen layout switched off, the check box has nothing to add.</p>
+<p>So a message reading "comment this is a link" is now two lines: "comment", and then
+the link on its own, one down arrow away.</p>
 
-<p>It reaches a message that Outlook renders as a web document: Outlook on the web, the
-new Outlook for Windows, and messages classic Outlook shows through its web control. A
-message that Word renders instead is not a web document at all, and NVDA has no screen
-layout to switch off there, so nothing can change it. When that happens the add-on
-writes a line to NVDA's log saying so, rather than quietly doing nothing.</p>
+<p>Outlook shows messages in two completely different ways, and the check box covers
+both.</p>
+
+<p>A message shown as a web page, which is what Outlook on the web and the new Outlook
+for Windows do, gets the same treatment NVDA's own "Use screen layout (when supported)"
+gives a web browser, applied to Outlook on its own so the setting your browsers use is
+not touched. If you already have NVDA's screen layout switched off, there is nothing to
+add and the check box stays out of the way.</p>
+
+<p>A message that Word renders, which is what classic Outlook does, is not a web page at
+all, and NVDA has no screen layout to switch off there. Its lines are Word's own, so a
+link in the middle of a sentence is read out as part of that sentence. For those, the
+down and up arrow keys walk the line a piece at a time instead, stopping either side of
+every link and button. Nothing else about the message changes: braille still shows the
+whole line, say all still reads it as it always did, and anything at all unexpected
+falls straight back to the way NVDA moves normally.</p>
 
 <h2>Switching windows</h2>
 
@@ -229,6 +239,15 @@ happens.</li>
 </ul>
 
 <h2>Changes</h2>
+
+<h3>1.8</h3>
+<ul>
+<li>"Links are on their own line" now works on a message that Word renders, which is
+what classic Outlook does. 1.7 only reached a message shown as a web page, because that
+is the only kind NVDA has a screen layout for. Word's message has no screen layout to
+switch off, so the down and up arrow keys now walk the line a piece at a time instead,
+stopping either side of every link and button.</li>
+</ul>
 
 <h3>1.7</h3>
 <ul>
