@@ -27,33 +27,71 @@ A **Mute browse mode** combo box is added to NVDA's Speech settings
 There is also a "cycle mute browse mode" command in the Input Gestures dialog under
 "Mute Browse Mode", with no gesture assigned by default.
 
+## In Outlook and Chromium browsers
+
+Neither of the two silencing choices stops at the document announcement in Microsoft
+Outlook or in Chromium based browsers. There, NVDA also stops speaking:
+
+- **window titles**, so switching to Outlook no longer reads the title of the message
+  list window and opening a message no longer reads the title of the message window;
+- **document titles**, so a browser tab no longer announces the page title;
+- **toasts and notification balloons**, such as a browser's download and pop-up
+  messages;
+- **live region "flash" messages**, which is how web pages announce things like
+  "Message sent".
+
+Chromium browsers are recognised by the window classes Chromium creates
+(`Chrome_WidgetWin_0`, `Chrome_WidgetWin_1`, `Chrome_RenderWidgetHostHWND`) as well as
+by executable name, so Chrome, Edge, Brave, Opera, Vivaldi and forks of them are all
+covered without the add-on needing to know about them, as is the new Outlook for
+Windows, which is a WebView2 application.
+
+Only announcements NVDA volunteers are dropped. Anything you ask for still answers:
+NVDA+t for the title and NVDA+tab for the focus both use `OutputReason.QUERY`, which
+is never suppressed.
+
 ## Building
 
 ```bash
 python build.py
 ```
 
-That writes `muteBrowseMode-1.0.nvda-addon` next to `build.py`. Open it to install,
+That writes `muteBrowseMode-1.1.nvda-addon` next to `build.py`. Open it to install,
 or drag it onto NVDA.
 
 ## How it works
 
-`speech.speech.speak` is wrapped with a gate, and the gate is held open across three
-points in NVDA where the document announcement happens:
+`speech.speech.speak` is wrapped with a gate, and the gate is held open across the
+four separate points in NVDA where a document gets announced. They are genuinely
+separate: silencing the document load does not silence the Outlook message, because
+NVDA does not read an Outlook message as part of a load.
 
+- `browseMode.BrowseModeDocumentTreeInterceptor.event_gainFocus` — where NVDA calls
+  `speakTextInfo(reason=FOCUS)` on the line the focus landed on. **This is what reads
+  the first line of an Outlook message.** It is gated only when
+  `_enteringFromOutside` is set, which is NVDA's own flag for "focus arrived from
+  outside this document", so tabbing and arrowing around inside a document keep
+  speaking normally.
 - `browseMode.BrowseModeDocumentTreeInterceptor.event_treeInterceptor_gainFocus` —
   where NVDA calls `speakObject` on the document root (the name plus "document") and
-  `speakTextInfo` on the current line (the first line). This covers web pages, and
-  also Outlook and Word message bodies, which are browse mode documents but not
-  virtual buffers.
+  `speakTextInfo` on the current line. This fires the first time a document is
+  entered.
 - `virtualBuffers.VirtualBuffer.loadBuffer` — the start of a load, which is what
   silences "Loading document...".
-- `virtualBuffers.VirtualBuffer._loadBufferDone` — the end of a load, and the moment
-  the chime belongs to.
+- `virtualBuffers.VirtualBuffer._loadBufferDone` — the end of a load, which speaks
+  "Refreshed" on a reload, and the moment the chime belongs to.
 
 Gating `speak` rather than each individual announcement means every route into the
 synthesiser is covered: `speakTextInfo`, `speakObject`, `speakMessage` and
 `ui.message` all funnel through it.
+
+On top of the gate, `speech.speakObject` drops window, pane, frame, document,
+application and alert roles in Outlook and Chromium windows, and
+`NVDAObject.event_liveRegionChange`, `behaviors.Notification.event_alert` /
+`event_show` and `IAccessible.event_alert` are silenced there. Those calls still run,
+so braille and NVDA's caches are unaffected — only the speech is dropped.
+`OutputReason.ONLYCACHE` is never suppressed, because browse mode relies on it to keep
+its property cache honest.
 
 The gate is a deadline, not a counter, so an exception can never leave NVDA
 permanently mute — the worst case is a few seconds of silence that expires on its

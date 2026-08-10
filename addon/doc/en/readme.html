@@ -27,11 +27,40 @@ the document is ready, so you still know when you can start reading.</p>
 <h2>Normal</h2>
 <p>NVDA behaves exactly as if the add-on were not installed. This is the default.</p>
 
+<h2>Outlook and Chromium browsers</h2>
+
+<p>In Microsoft Outlook and in every Chromium based browser, the two choices above go
+further than they do elsewhere. As well as the document announcement, NVDA no longer
+speaks:</p>
+
+<ul>
+<li>window titles, so switching to Outlook no longer reads the title of the message
+list window, and opening a message no longer reads the title of the message
+window;</li>
+<li>document titles, so a browser tab no longer announces the page title;</li>
+<li>toasts and notification balloons, such as a browser's download and pop-up
+messages;</li>
+<li>live region "flash" messages, which is how web pages announce things like "Message
+sent" or "Your changes were saved".</li>
+</ul>
+
+<p>Every Chromium based browser is covered, including Chrome, Edge, Brave, Opera,
+Vivaldi and forks of them, because the add-on recognises them by the windows Chromium
+creates rather than by a list of program names. The new Outlook for Windows is
+recognised the same way, as it is built on the same engine.</p>
+
+<p>You can still ask for any of this at any time. NVDA+t reads the title, and NVDA+tab
+reads the focus, exactly as usual: only the announcements NVDA makes on its own
+initiative are dropped.</p>
+
 <h2>Notes</h2>
 <ul>
 <li>Pressing any key immediately restores normal speech, so the add-on can never
 leave NVDA quiet when you are trying to work.</li>
-<li>Braille is untouched: the document and the current line are still brailled.</li>
+<li>Braille is untouched. The document, the current line, alerts and flash messages
+are all still brailled, including the ones that are no longer spoken.</li>
+<li>Moving around inside a document with tab, the arrow keys and the quick navigation
+keys always speaks. Only arriving in a document from outside it is silenced.</li>
 <li>Say all is never silenced. If you use Browse Mode settings, "Automatically say
 all on page load", NVDA will still read the page to you after it loads. Turn that
 setting off if you want the silence.</li>
@@ -41,6 +70,24 @@ rather than speech. Turn it off and NVDA speaks "browse mode" instead, which thi
 add-on does silence.</li>
 <li>A command to cycle between the three choices is available in the Input Gestures
 dialog under "Mute Browse Mode". It has no gesture assigned by default.</li>
+</ul>
+
+<h2>Changes</h2>
+
+<h3>1.1</h3>
+<ul>
+<li>Fixed the first line of an Outlook message still being read when the message was
+opened. NVDA reads that line from a focus event rather than from the document load,
+so silencing the load never reached it.</li>
+<li>Window titles and document titles are no longer spoken in Outlook or in Chromium
+based browsers.</li>
+<li>Browser flash alerts, live region messages and toasts are now silenced too.</li>
+<li>The tones now also play when an Outlook message is opened.</li>
+</ul>
+
+<h3>1.0</h3>
+<ul>
+<li>First release.</li>
 </ul>
 
 </body>
