@@ -82,6 +82,42 @@ the wrappers, so say all still resumes from an arrow key.
 Both combo boxes also have a cycle command in the Input Gestures dialog under
 "Mute Browse Mode", with no gesture assigned by default.
 
+## The Outlook spelling checker
+
+When the F7 spelling window takes the focus, NVDA says the word the checker is asking
+about and then spells it out, a fifth more slowly than your usual rate, with the rate
+back to normal straight afterwards.
+
+The slowdown is a `speech.commands.RateCommand(multiplier=0.8)` inside that one
+announcement, followed by a plain `RateCommand()` to return to the configured value. It
+is a synth parameter carried in the speech sequence, not a change to the synthesiser's
+settings, so it lasts exactly as long as the spelling does and cannot leak anywhere
+else — not even if the announcement is interrupted half way through.
+
+Finding the word:
+
+- The dialog's box is a Word editing surface with window class `_WwN`, which NVDA has a
+  class of its own for (`WordDocument_WwN`). The focus often lands on the suggestions
+  list rather than that box, so it is looked up by window class in the same thread with
+  `NVDAHelper.localLib.findWindowWithClassInThread`, the same call NVDA uses to find the
+  document behind such a box. It only counts when `winUser.getAncestor(..., GA_ROOT)`
+  says it belongs to the same top-level window as the focus, so a Word surface in some
+  other Outlook dialog is never mistaken for it.
+- `WordDocument_WwN` points `WinwordSelectionObject` at the application's active pane,
+  and Word selects the error in the message itself as it steps through — so
+  `makeTextInfo(POSITION_SELECTION)` on that object *is* the misspelled word. The word
+  under the cursor is the fallback.
+- Whatever comes back must look like a single word (non-empty, no whitespace, at most
+  60 characters) or it is discarded and nothing is said. The box holds the whole
+  sentence the error is in, and reading that out would be worse than silence.
+
+The word is remembered with its window, so the dialog moving to the next error announces
+that one while a repeated focus event on the same one does not. Leaving the dialog
+clears it, so coming back announces again.
+
+This is not tied to the mute browse mode combo box: like control+F, it adds something
+rather than silencing something, and works whatever that setting is on.
+
 ## Switching windows
 
 Nothing is silenced while NVDA is announcing a window you have just switched to. The
@@ -245,7 +281,7 @@ NVDA+t for the title, NVDA+tab for the focus and NVDA+b for a whole dialog all u
 python build.py
 ```
 
-That writes `muteBrowseMode-1.8.nvda-addon` next to `build.py`. Open it to install,
+That writes `muteBrowseMode-1.9.nvda-addon` next to `build.py`. Open it to install,
 or drag it onto NVDA.
 
 ## How it works

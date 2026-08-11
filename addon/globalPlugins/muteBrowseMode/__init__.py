@@ -76,6 +76,15 @@ except Exception:
 	_CallbackCommand = None
 	log.debugWarning("Mute Browse Mode: CallbackCommand unavailable", exc_info=True)
 
+try:
+	from speech.commands import EndUtteranceCommand as _EndUtteranceCommand
+	from speech.commands import RateCommand as _RateCommand
+except Exception:
+	# Without these a misspelled word is still spelled out, just not more slowly.
+	_EndUtteranceCommand = None
+	_RateCommand = None
+	log.debugWarning("Mute Browse Mode: speech commands unavailable", exc_info=True)
+
 if "ngettext" not in globals():
 	# initTranslation puts ngettext in this module's globals. NVDA only installs ``_``
 	# into builtins, so if that call failed there would otherwise be no plural form.
@@ -1068,6 +1077,112 @@ def _announceMessageBody():
 		ui.message(_("You are now in the message body, type a message."))
 
 
+### The Outlook spelling checker
+
+#: The window class Word gives an editing surface it puts inside one of its own
+#: dialogs, which NVDA has a class of its own for, ``WordDocument_WwN``. In Outlook the
+#: one the user meets is the box in the F7 spelling dialog.
+_WORD_DIALOG_WINDOW_CLASS = "_WwN"
+
+#: How much slower than usual the word is spelled out. 0.8 is a fifth slower.
+_SPELL_RATE_MULTIPLIER = 0.8
+
+#: Longer than this and whatever we found is not one misspelled word.
+_MAX_WORD_LENGTH = 60
+
+
+def _looksLikeWord(text):
+	"""Whether C{text} is one word, rather than a sentence or nothing at all."""
+	word = (text or "").strip()
+	if not word or len(word) > _MAX_WORD_LENGTH:
+		return False
+	return not any(character.isspace() for character in word)
+
+
+def _outlookSpellCheckField(obj):
+	"""The Word surface belonging to the spelling dialog the focus is in, if it is.
+
+	The focus lands on whichever control the dialog starts on, which is not always the
+	box holding the word, so the surface is looked for by window class in the same
+	thread, the way NVDA finds the document behind such a box itself. It only counts
+	when it belongs to the same window as the focus: a Word surface sitting in some
+	dialog elsewhere in Outlook is not the one being looked at.
+	"""
+	if not _isOutlook(obj):
+		return None
+	if _windowClassOf(obj) == _WORD_DIALOG_WINDOW_CLASS:
+		return obj
+	try:
+		import NVDAHelper
+		import winUser
+		from NVDAObjects.IAccessible import getNVDAObjectFromEvent
+
+		window = NVDAHelper.localLib.findWindowWithClassInThread(
+			obj.windowThreadID,
+			_WORD_DIALOG_WINDOW_CLASS,
+			True,
+		)
+		if not window:
+			return None
+		root = getattr(winUser, "GA_ROOT", 2)
+		if winUser.getAncestor(obj.windowHandle, root) != winUser.getAncestor(window, root):
+			# A Word dialog, but not the one the focus is in.
+			return None
+		return getNVDAObjectFromEvent(window, winUser.OBJID_CLIENT, 0)
+	except Exception:
+		log.debugWarning("Mute Browse Mode: could not look for the spelling dialog", exc_info=True)
+		return None
+
+
+def _misspelledWord(field):
+	"""The word the spelling checker is asking about.
+
+	Word selects the error in the message itself as it steps through, and NVDA points
+	the box in the dialog at that same selection, so the selection is the word. The
+	word under the cursor is the fallback for anything that does not work that way.
+	Whatever comes back has to look like a single word, or it is not used at all: the
+	box holds the whole sentence the error is in, and reading that out would be worse
+	than saying nothing.
+	"""
+	for position, unit in (
+		(textInfos.POSITION_SELECTION, None),
+		(textInfos.POSITION_CARET, textInfos.UNIT_WORD),
+	):
+		try:
+			info = field.makeTextInfo(position)
+			if unit is not None:
+				info.expand(unit)
+			word = (info.text or "").strip()
+		except Exception:
+			continue
+		if _looksLikeWord(word):
+			return word
+	return None
+
+
+def _spellingSpeech(word):
+	"""The word, then the word spelled out a fifth more slowly than usual."""
+	sequence = [word]
+	getSpelling = getattr(speech, "getSpellingSpeech", None)
+	if getSpelling is None:
+		return sequence
+	if _EndUtteranceCommand is not None:
+		sequence.append(_EndUtteranceCommand())
+	if _RateCommand is not None:
+		sequence.append(_RateCommand(multiplier=_SPELL_RATE_MULTIPLIER))
+	sequence.extend(getSpelling(word))
+	if _RateCommand is not None:
+		# Back to the rate the user chose. The synthesiser is never reconfigured, so
+		# this cannot escape the one announcement even if it is interrupted.
+		sequence.append(_RateCommand())
+	return sequence
+
+
+def _announceMisspelledWord(word):
+	with _ownSpeech():
+		speech.speak(_spellingSpeech(word))
+
+
 ### Putting links on their own line in Outlook
 
 # NVDA already does this in a web browser: Browse Mode settings, "Use screen layout
@@ -1725,6 +1840,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		#: The window the message body announcement was last made for, so that tabbing
 		#: away and back announces it again but a repeated focus event does not.
 		self._lastBodyWindow = None
+		#: The window and word the spelling checker was last answered for, so that the
+		#: dialog moving on to the next word says that one and a repeated focus event
+		#: does not say the same one twice.
+		self._lastSpellCheck = None
 
 		try:
 			# Gating speech itself, rather than each announcement, catches every route
@@ -1935,9 +2054,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 					nextHandler()
 				_speakBriefFocus(sequence)
 				self._reportMessageBody(obj)
+				self._reportMisspelledWord(obj)
 				return
 		nextHandler()
 		self._reportMessageBody(obj)
+		self._reportMisspelledWord(obj)
 
 	def _reportMessageBody(self, obj):
 		"""Say when the focus has reached an Outlook message body.
@@ -1964,6 +2085,32 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			_announceMessageBody()
 		except Exception:
 			log.error("Mute Browse Mode: could not announce the message body", exc_info=True)
+
+	def _reportMisspelledWord(self, obj):
+		"""Say the word the Outlook spelling checker is asking about, then spell it.
+
+		Spelled a fifth more slowly than usual, which is done with a speech command
+		inside the announcement rather than by changing the synthesiser's rate, so it
+		lasts exactly as long as the spelling does and cannot be left behind anywhere
+		else even if the announcement is interrupted half way through.
+		"""
+		try:
+			field = _outlookSpellCheckField(obj)
+			if field is None:
+				self._lastSpellCheck = None
+				return
+			word = _misspelledWord(field)
+			if word is None:
+				return
+			seen = (getattr(field, "windowHandle", None), word)
+			if seen == self._lastSpellCheck:
+				# The same word again, from a second focus event on the same dialog.
+				return
+			self._lastSpellCheck = seen
+			log.debug("Mute Browse Mode: spelling checker is asking about %r" % word)
+			_announceMisspelledWord(word)
+		except Exception:
+			log.error("Mute Browse Mode: could not announce the misspelled word", exc_info=True)
 
 	def terminate(self):
 		_cancelSummary()

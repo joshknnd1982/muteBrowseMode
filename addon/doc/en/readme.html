@@ -87,6 +87,23 @@ every link and button. Nothing else about the message changes: braille still sho
 whole line, say all still reads it as it always did, and anything at all unexpected
 falls straight back to the way NVDA moves normally.</p>
 
+<h2>The Outlook spelling checker</h2>
+
+<p>When the F7 spelling window takes the focus, NVDA says the word the checker is
+asking about, and then spells it out. The spelling is read a fifth more slowly than
+your usual rate, and your rate goes straight back to normal after it.</p>
+
+<p>The slower rate is part of that one announcement rather than a change to your
+synthesiser, so it cannot be left behind anywhere else, not even if you interrupt the
+spelling half way through. Nothing outside the spelling window is affected at all.</p>
+
+<p>The word is whichever one the checker has stopped on: Word selects the error in the
+message itself as it steps through, and the box in the dialog is pointed at that same
+selection. Moving on to the next error says that one; the same word is not said twice
+if the focus moves around inside the dialog. If the word cannot be worked out, nothing
+is said and NVDA carries on as usual, because the box holds the whole sentence the
+error is in and reading that out would be worse than saying nothing.</p>
+
 <h2>Switching windows</h2>
 
 <p>Nothing is ever silenced while NVDA is announcing a window you have just switched
@@ -239,6 +256,14 @@ happens.</li>
 </ul>
 
 <h2>Changes</h2>
+
+<h3>1.9</h3>
+<ul>
+<li>The F7 spelling window in Outlook now says the word the checker is asking about,
+and then spells it out a fifth more slowly than your usual rate, putting the rate back
+to normal straight afterwards. The slower rate belongs to that one announcement rather
+than to your synthesiser, so nothing outside the spelling window is affected.</li>
+</ul>
 
 <h3>1.8</h3>
 <ul>
