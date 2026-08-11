@@ -1856,6 +1856,67 @@ class _TextFieldCursorManager(cursorManager.CursorManager):
 			# The caret has already moved; this is only the reporting of it.
 			log.debugWarning("Mute Browse Mode: could not report the find move", exc_info=True)
 
+	def doFindText(self, text, reverse=False, caseSensitive=False, willSayAllResume=False):
+		"""Search, then read the line the match is on rather than one line past it.
+
+		NVDA's own version finds the text, puts the caret on it, and then reads a range
+		it builds like this::
+
+			info.move(textInfos.UNIT_LINE, 1, endPoint="end")
+
+		— the match, extended forward by one line unit, meaning "the found text and the
+		rest of its line". In a virtual buffer that is offset arithmetic and the end
+		lands exactly on the start of the next line. A UIA text control is not offset
+		arithmetic: ``MoveEndpointByUnit`` normalises an endpoint that is in the middle
+		of a unit to the unit boundary *first* and then moves a whole unit, so the end
+		overshoots into the following line and NVDA reads on into it. Windows 11 Notepad
+		is such a control, and this add-on is the first thing that ever ran NVDA's find
+		against one, because until then there was no find in an edit box at all.
+
+		So the search is still entirely NVDA's — this passes ``willSayAllResume=True``,
+		which is the one thing in ``doFindText`` that suppresses the speaking and
+		nothing else, and leaves finding, moving the caret, cancelling speech, the "not
+		found" message and ``_lastFindText`` exactly where they were. Only the range
+		that gets spoken is built here, by collapsing to the caret and expanding by a
+		line, which means the same thing to every kind of text info.
+
+		Whether anything was found is read back from the caret afterwards rather than
+		guessed at: NVDA leaves it alone when there is no match.
+		"""
+		info = self.makeTextInfo(textInfos.POSITION_CARET)
+		if not info.find(text, reverse=reverse, caseSensitive=caseSensitive):
+			# Nothing found. Hand it back to NVDA, which owns the wording of that message
+			# and its translations into every language NVDA speaks. It searches once more
+			# and fails the same way; that only ever happens when there was nothing to
+			# find, so the repeat costs nothing worth saving.
+			super().doFindText(
+				text,
+				reverse=reverse,
+				caseSensitive=caseSensitive,
+				willSayAllResume=willSayAllResume,
+			)
+			return
+		# ``find`` leaves this collapsed on the match, so the caret goes exactly there.
+		self.selection = info
+		speech.cancelSpeech()
+		# Expanded from the match itself, not from reading the caret back afterwards.
+		# 2.6 did the latter and still spoke the wrong line: a caret read back out of a
+		# UIA control is not necessarily the position that was just written to it, and
+		# expanding from it inherits whatever it settled on. The match is the one thing
+		# here that is not in doubt.
+		line = info.copy()
+		line.expand(textInfos.UNIT_LINE)
+		cursorManager.CursorManager._lastFindText = text
+		cursorManager.CursorManager._lastCaseSensitivity = caseSensitive
+		if willSayAllResume:
+			return
+		if _tracing:
+			try:
+				_traceWrite("FIND %r matched, speaking line %r" % (text, (line.text or "")[:120]))
+			except Exception:
+				pass
+		speech.speakTextInfo(line, reason=controlTypes.OutputReason.CARET)
+
 
 def _findableTextField(obj):
 	"""C{obj} itself when it is an edit box NVDA could search, otherwise C{None}.
@@ -1997,6 +2058,44 @@ def _describeScript(func):
 		)
 	except Exception:
 		return "script=?"
+
+
+def _traceSpeech(args, kwargs):
+	"""Record what is about to be spoken, and by whom.
+
+	Every route into the synthesiser goes through ``speech.speak``, so this catches the
+	lot: NVDA's own announcements, the add-on's, and anything an app module adds. The
+	caller is worth as much as the text — "which line was read" and "who read it" are
+	different questions, and a find that reads the wrong line looks identical from the
+	outside to a find that reads the right one and is then talked over by something else.
+	"""
+	if not _tracing:
+		return
+	try:
+		sequence = args[0] if args else kwargs.get("speechSequence")
+		if not isinstance(sequence, (list, tuple)):
+			return
+		text = " ".join(part for part in sequence if isinstance(part, str)).strip()
+		if not text:
+			return
+		caller = "?"
+		try:
+			import inspect
+
+			frame = inspect.currentframe().f_back.f_back
+			for _step in range(6):
+				if frame is None:
+					break
+				name = frame.f_code.co_name
+				if name not in ("speak", "_traceSpeech"):
+					caller = "%s:%s" % (frame.f_globals.get("__name__", "?"), name)
+					break
+				frame = frame.f_back
+		except Exception:
+			pass
+		_traceWrite("SAY [%s] %r" % (caller, text[:160]))
+	except Exception:
+		pass
 
 
 def _traceGesture(gesture):
@@ -2555,6 +2654,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		def speak(*args, **kwargs):
 			if getMode() != MODE_NORMAL and _isGated():
 				return
+			if _tracing:
+				_traceSpeech(args, kwargs)
 			if _announcingNow():
 				# Let the announcement tell us when it has actually been said, rather
 				# than guessing how long a window title takes to read out.

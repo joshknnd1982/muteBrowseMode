@@ -299,6 +299,31 @@ happens.</li>
 
 <h2>Changes</h2>
 
+<h3>2.7</h3>
+<ul>
+<li>Fixed find in an edit box reading the wrong line. In Notepad, finding a word read on
+past the line it had landed on. The caret was never affected — it is placed on the match
+before any of the reading happens — so this was always about what you heard rather than
+where you were.</li>
+<li>NVDA builds the range it reads by taking the match and extending it forward by one
+line unit, meaning "the found text and the rest of its line". Against a virtual buffer
+that is offset arithmetic and stops exactly at the start of the next line. A UIA text
+control is not offset arithmetic, and NVDA's find had never met one before this add-on
+gave it an edit box to search.</li>
+<li>So the range that gets read is now built here instead, by expanding the match itself
+by a line, which means the same thing to every kind of text info. The searching is still
+entirely NVDA's, including the "not found" message, its translations, and the remembered
+search text that carries between an edit box, a web page and NVDA+control+F.</li>
+<li>2.6, an interim build that was never released, expanded from the caret read back
+after the search rather than from the match. That was still wrong: a caret read back out
+of a UIA control is not necessarily the position just written to it. The match is the one
+thing in the whole operation that is not in doubt, so that is what is used.</li>
+<li>The optional trace now records what is spoken as well as keystrokes and focus, with
+the module that asked for it. "Which line was read" and "who read it" are different
+questions, and a find that reads the wrong line looks identical from the outside to a
+find that reads the right one and is then talked over.</li>
+</ul>
+
 <h3>2.5</h3>
 <ul>
 <li>Control+F now opens NVDA's find in <strong>edit boxes</strong> as well as in browse

@@ -420,7 +420,7 @@ NVDA+t for the title, NVDA+tab for the focus and NVDA+b for a whole dialog all u
 python build.py
 ```
 
-That writes `muteBrowseMode-2.5.nvda-addon` next to `build.py`. Open it to install,
+That writes `muteBrowseMode-2.7.nvda-addon` next to `build.py`. Open it to install,
 or drag it onto NVDA.
 
 ## How it works
