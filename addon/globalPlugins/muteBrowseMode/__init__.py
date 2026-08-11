@@ -1805,35 +1805,136 @@ def _findIsOursIn(obj):
 	return False
 
 
-def _browseModeDocumentForFind():
-	"""The document NVDA's find would search, or C{None} if control+F is not ours.
+#: Roles that count as an edit box for the purpose of searching one.
+_EDIT_ROLES = _members(controlTypes.Role, ("EDITABLETEXT", "DOCUMENT", "TERMINAL"))
+
+_STATE_EDITABLE = getattr(controlTypes.State, "EDITABLE", None)
+_STATE_PROTECTED = getattr(controlTypes.State, "PROTECTED", None)
+
+
+class _TextFieldCursorManager(cursorManager.CursorManager):
+	"""Lends NVDA's find to an edit box that has no cursor manager of its own.
+
+	NVDA defines find on ``cursorManager.CursorManager``, and only browse mode plus a
+	few app modules mix that in — so in an ordinary edit box there is nothing for
+	control+F to invoke, and NVDA+control+F does nothing there either.
+
+	Nothing about the search actually needs a browse mode document, though. NVDA's
+	``doFindText`` wants somewhere to make a TextInfo, a ``find`` on that TextInfo, and
+	somewhere to put the selection, and every editable object already has all three. So
+	this borrows the object and hands it to NVDA's own dialog and its own search: what
+	the user gets is the find they already know, not a copy of it.
+	"""
+
+	def __init__(self, obj):
+		super().__init__()
+		self._obj = obj
+
+	def makeTextInfo(self, position):
+		return self._obj.makeTextInfo(position)
+
+	def _get_selection(self):
+		return self._obj.makeTextInfo(textInfos.POSITION_SELECTION)
+
+	def _set_selection(self, info):
+		"""Move the caret to what was found.
+
+		NVDA's own version of this hands ``self`` to braille and vision. Ours must hand
+		them the real object instead: this one is a stand-in that was made a moment ago
+		for one search and is about to be dropped, and it is not what is on screen.
+		"""
+		info.updateSelection()
+		try:
+			import braille
+			import review
+			import vision
+
+			review.handleCaretMove(info)
+			braille.handler.handleCaretMove(self._obj)
+			vision.handler.handleCaretMove(self._obj)
+		except Exception:
+			# The caret has already moved; this is only the reporting of it.
+			log.debugWarning("Mute Browse Mode: could not report the find move", exc_info=True)
+
+
+def _findableTextField(obj):
+	"""C{obj} itself when it is an edit box NVDA could search, otherwise C{None}.
+
+	Not every text object can be searched. ``TextInfo.find`` is implemented by the
+	offset and UIA text infos but the base class only raises ``NotImplementedError``, so
+	the ones that cannot are ruled out here — before the user has typed what they were
+	looking for, rather than after.
+
+	A password box is left alone. It is an edit box by every other test, but searching
+	one is no use to anybody and reading the result aloud even less so.
+	"""
+	if obj is None:
+		return None
+	try:
+		states = set(obj.states or ())
+	except Exception:
+		states = set()
+	if _hasState(states, _STATE_PROTECTED):
+		return None
+	try:
+		if obj.role not in _EDIT_ROLES and not _hasState(states, _STATE_EDITABLE):
+			return None
+	except Exception:
+		return None
+	try:
+		info = obj.makeTextInfo(textInfos.POSITION_CARET)
+	except Exception:
+		return None
+	if type(info).find is textInfos.TextInfo.find:
+		return None
+	return obj
+
+
+def _findSource():
+	"""What control+F would search here, as C{(kind, object)}, or C{None} for nothing.
+
+	C{kind} is ``"document"`` for a browse mode buffer, which NVDA can already search as
+	it stands, or ``"field"`` for an edit box, which needs L{_TextFieldCursorManager}
+	wrapped round it first. The wrapping is deliberately left to the caller: this runs on
+	every focus change to decide whether the key is bound, and there is no point building
+	an adapter that is only going to be thrown away.
 
 	Everything has to line up before the key is taken off the program:
 
-	* one of the two find check boxes covers the program this is (L{_findIsOursIn});
-	* the focus is inside a browse mode document that can search — a C{CursorManager},
-	  which is where NVDA defines ``script_find``. Outside NVDA's own browse mode that
-	  is Kindle, PowerPoint, an OCR result and UIA web content, and nothing else: a
-	  Word document is not one, so control+F in Word stays Word's own find whatever
-	  these check boxes say;
-	* that document is in browse mode rather than focus mode, because in focus mode the
-	  key belongs to whatever the user is typing in.
+	* one of the two find check boxes covers the program this is, and it is not Outlook
+	  (L{_findIsOursIn});
+	* and there is either a browse mode document in browse mode, or an edit box that can
+	  be searched.
 	"""
 	if not (getBrowserFind() or getFindWhenNotOutlook()):
 		return None
 	try:
-		treeInterceptor = api.getFocusObject().treeInterceptor
+		focus = api.getFocusObject()
 	except Exception:
 		return None
-	if not isinstance(treeInterceptor, cursorManager.CursorManager):
+	# Outlook first and without exception: control+F forwards the message there.
+	if not _findIsOursIn(focus):
 		return None
-	if not getattr(treeInterceptor, "isReady", False):
+	treeInterceptor = getattr(focus, "treeInterceptor", None)
+	if (
+		isinstance(treeInterceptor, cursorManager.CursorManager)
+		and getattr(treeInterceptor, "isReady", False)
+		and not getattr(treeInterceptor, "passThrough", False)
+	):
+		# Browse mode, so search the whole document rather than the control the focus
+		# happens to be sitting on inside it.
+		return ("document", treeInterceptor)
+	field = _findableTextField(focus)
+	return ("field", field) if field is not None else None
+
+
+def _findTarget():
+	"""The object to run NVDA's find on, ready to use, or C{None}."""
+	source = _findSource()
+	if source is None:
 		return None
-	if getattr(treeInterceptor, "passThrough", False):
-		return None
-	if not _findIsOursIn(getattr(treeInterceptor, "rootNVDAObject", None)):
-		return None
-	return treeInterceptor
+	kind, obj = source
+	return obj if kind == "document" else _TextFieldCursorManager(obj)
 
 
 ### Tracing
@@ -2527,23 +2628,22 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		),
 	)
 	def script_browserFind(self, gesture):
-		"""Control+F in a web page opens NVDA's find.
+		"""Control+F opens NVDA's find, in a browse mode document or in an edit box.
 
-		Bound to control+F, but only where NVDA has a document to search — see
+		Bound to control+F, but only where NVDA has something to search — see
 		L{_syncBrowserFindBinding} for why the binding comes and goes rather than
-		staying put.
+		staying put, and L{_findSource} for what counts.
 
-		Where NVDA cannot search, the key is handed straight back to the program. That
-		covers the browser's own chrome: pressing control+F while the focus is already
-		in the find bar, or in the address bar, does what it always did.
+		Where NVDA cannot search, the key is handed straight back to the program, so it
+		does whatever it always did.
 		"""
-		treeInterceptor = _browseModeDocumentForFind()
-		if treeInterceptor is None:
+		target = _findTarget()
+		if target is None:
 			log.debug("Mute Browse Mode: nothing to find in, control+F goes to the program")
 			gesture.send()
 			return
-		log.debug("Mute Browse Mode: opening NVDA's find in place of the browser's")
-		treeInterceptor.script_find(gesture)
+		log.debug("Mute Browse Mode: opening NVDA's find on %r" % target)
+		target.script_find(gesture)
 
 	def _syncBrowserFindBinding(self):
 		"""Claim control+F only where NVDA actually has a document to search.
@@ -2579,7 +2679,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		opening the program's own find instead, which is what it would have done anyway.
 		"""
 		try:
-			wanted = _browseModeDocumentForFind() is not None
+			wanted = _findSource() is not None
 		except Exception:
 			wanted = False
 		if wanted == self._browserFindBound:

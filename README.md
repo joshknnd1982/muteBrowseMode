@@ -81,15 +81,15 @@ the wrappers, so say all still resumes from an arrow key.
 
 ### Control+F opens NVDA's find in a web browser
 
-A check box, ticked by default. Control+F in a web browser opens NVDA's find instead of
-the browser's own find bar.
+A check box, ticked by default. Control+F in a web browser opens NVDA's find — in a
+browse mode buffer or in an edit box — instead of the browser's own find bar.
 
 ### Bring up NVDA screen reader find when not in Outlook
 
 A check box, unticked by default. Widens the one above from web browsers to everywhere
 except Microsoft Outlook, where control+F stays Forward. Where both are ticked this one
 wins. See [Control+F opens NVDA's find](#controlf-opens-nvdas-find-in-a-browser) for
-what "everywhere" covers.
+what counts as somewhere NVDA can search.
 
 Both combo boxes also have a cycle command in the Input Gestures dialog under
 "Mute Browse Mode", with no gesture assigned by default.
@@ -298,11 +298,37 @@ find bar only scrolls the page and puts the keyboard somewhere else entirely. It
 the one that keeps working: an embedded document holding the focus swallows the
 browser's control+F, but NVDA's find never leaves the buffer.
 
-Everything has to line up before the key is taken off the program — one of the two check
-boxes below covers this program, the focus is in a `CursorManager` tree interceptor
-(which is where NVDA defines `script_find`), and that document is in browse mode rather
-than focus mode. Where NVDA has nothing to search — the address bar, or the browser's own
-find bar — the key is handed straight back with `gesture.send()`.
+Control+F opens NVDA's find in two kinds of place:
+
+- **a browse mode buffer**, where it searches the whole document, as NVDA's find always
+  has;
+- **an edit box** — any edit box: a document, a terminal, or anything NVDA marks
+  editable — where it searches the field you are in.
+
+Where NVDA has nothing it can search, the key is handed straight back with
+`gesture.send()` and does whatever it always did.
+
+### NVDA's find in an edit box
+
+NVDA defines find on `cursorManager.CursorManager`, which only browse mode and a handful
+of app modules mix in, so in an ordinary edit box there is nothing for control+F — or for
+NVDA+control+F — to invoke at all.
+
+Nothing about the search actually needs a browse mode document, though. `doFindText`
+wants somewhere to make a TextInfo, a `find` on that TextInfo, and somewhere to put the
+selection, and every editable object already has all three. So `_TextFieldCursorManager`
+borrows the object and hands it to NVDA's own `FindDialog` and NVDA's own `doFindText`:
+what you get is the find you already know, not a copy of it. `_lastFindText` lives on
+`CursorManager` itself, so the text you searched for carries between an edit box, a web
+page and NVDA+control+F.
+
+Two details it has to get right. `CursorManager._set_selection` hands `self` to braille
+and vision; the adapter hands them the real object instead, because the adapter was made
+a moment ago for one search and is about to be dropped. And `TextInfo.find` is
+implemented by the offset and UIA text infos but the base class only raises
+`NotImplementedError` — so an edit box whose text info cannot search is ruled out
+*before* the dialog opens, rather than failing after you have typed what you were
+looking for. Password boxes are excluded outright.
 
 ### The two check boxes
 
@@ -315,15 +341,13 @@ The second is a widening of the first, so where both are ticked the second wins 
 everywhere the first reached is still reached. Untick both and control+F always goes to
 the program. NVDA's find stays on NVDA+control+F either way.
 
-**Outlook is the exception in both cases.** Control+F is Forward there, and it has to
-arrive as the key you actually pressed. `_isWebBrowser` rules Outlook out before anything
-else in its own right, because the new Outlook for Windows is a WebView2 application and
-looks exactly like Chromium from the outside.
-
-**"Everywhere" is bounded by where NVDA can search at all.** `CursorManager` — the mix-in
-that defines `script_find` — appears in `browseMode` and in Kindle, PowerPoint, MSN, OCR
-results and UIA web content, and nowhere else. A Word document is not one of them, so
-control+F in Microsoft Word is still Word's own find whatever these check boxes say.
+**Outlook is the exception in both cases, everywhere and always.** Control+F forwards the
+message you are reading, and that is as true of the message body, the subject line and
+the address fields as it is of the message list — all of them are edit boxes or browse
+mode buffers that would otherwise qualify. `_findSource` tests for Outlook before it
+tests for anything else, and neither check box can override it. `_isWebBrowser` rules
+Outlook out in its own right as well, because the new Outlook for Windows is a WebView2
+application and looks exactly like Chromium from the outside.
 
 ### Why the binding comes and goes
 
@@ -396,7 +420,7 @@ NVDA+t for the title, NVDA+tab for the focus and NVDA+b for a whole dialog all u
 python build.py
 ```
 
-That writes `muteBrowseMode-2.4.nvda-addon` next to `build.py`. Open it to install,
+That writes `muteBrowseMode-2.5.nvda-addon` next to `build.py`. Open it to install,
 or drag it onto NVDA.
 
 ## How it works

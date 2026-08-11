@@ -222,10 +222,19 @@ default — everywhere except Microsoft Outlook. Where both are ticked this one 
 being the wider of the two. Untick both and control+F always reaches the program.</li>
 </ul>
 
-<p>"Everywhere" means everywhere NVDA has a browse mode document to search, which
-outside a browser is Kindle, PowerPoint, an OCR result and UIA web content. A Word
-document is not one of those, so control+F in Microsoft Word remains Word's own find
-whatever these check boxes say.</p>
+<p>Control+F opens NVDA's find in two kinds of place:</p>
+
+<ul>
+<li><strong>a browse mode buffer</strong>, where it searches the whole document, as
+NVDA's find always has;</li>
+<li><strong>an edit box</strong> — any edit box: a document, a terminal, or anything
+NVDA marks editable — where it searches the field you are in. NVDA has no find of its
+own in an edit box, so the add-on lends it NVDA's own dialog and NVDA's own search.
+Password boxes are left alone.</li>
+</ul>
+
+<p>Where NVDA has nothing it can search, control+F is handed straight back to the
+program and does whatever it always did.</p>
 
 <p>NVDA's find is on NVDA+control+F either way, with NVDA+F3 and NVDA+shift+F3 for the
 next and previous match.</p>
@@ -289,6 +298,24 @@ happens.</li>
 </ul>
 
 <h2>Changes</h2>
+
+<h3>2.5</h3>
+<ul>
+<li>Control+F now opens NVDA's find in <strong>edit boxes</strong> as well as in browse
+mode buffers. NVDA defines its find on browse mode documents only, so until now there
+was nothing for control+F — or NVDA+control+F — to invoke in an ordinary edit box. The
+add-on lends NVDA's own find dialog and its own search to the edit box the focus is in,
+so what you get is the find you already know, searching the field you are in.</li>
+<li>Every kind of edit box counts: a document, a terminal, or anything NVDA marks
+editable, in any program the check boxes cover. Password boxes are left alone.</li>
+<li><strong>Microsoft Outlook is still the exception, everywhere and always.</strong>
+Control+F forwards the message you are reading, and that is true of the message body,
+the subject line, the address fields and the message list alike. Neither check box ever
+takes control+F away from Outlook.</li>
+<li>Where an edit box cannot be searched — NVDA's find needs a text info that implements
+searching, and not all of them do — control+F is handed straight back to the program
+rather than opening a dialog that could not have worked.</li>
+</ul>
 
 <h3>2.4</h3>
 <ul>
