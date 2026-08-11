@@ -115,8 +115,8 @@ The word is remembered with its window, so the dialog moving to the next error a
 that one while a repeated focus event on the same one does not. Leaving the dialog
 clears it, so coming back announces again.
 
-This is not tied to the mute browse mode combo box: like control+F, it adds something
-rather than silencing something, and works whatever that setting is on.
+This is not tied to the mute browse mode combo box: it adds something rather than
+silencing something, and works whatever that setting is on.
 
 ## Switching windows
 
@@ -233,19 +233,99 @@ The summary is also skipped for a page that loaded in a background tab, for a pa
 started using before it finished loading (any keypress cancels it), and while say all
 is running.
 
-## Control+F in Outlook
+## Documents that take the focus on their own
 
-Control+F is handed straight to whichever program you are in and is never claimed by
-NVDA. In Outlook that forwards the message you are reading, which is what control+F
-means in Outlook. In a browser it opens the browser's find bar.
+Dropping document titles is the whole point of the add-on when a page loads. It is
+badly wrong at any other moment.
 
-NVDA's find stays on **NVDA+control+F**, which is where NVDA itself binds it, with
-NVDA+F3 and NVDA+shift+F3 for the next and previous match.
+Some pages carry an embedded document — an iframe — that takes the keyboard focus when
+the browse cursor comes near it. An "Image Magnify" frame on a product page does it
+when you press control+home, or arrow up to the top. **While the focus is inside one of
+those, the browser's own control+F does not open the find bar**, and the enter you press
+next is taken by browse mode as "activate what is under the cursor", so nothing happens
+at all.
 
-The add-on binds control+F rather than leaving it unbound because a global plugin
-script is the first thing NVDA looks for, ahead of the browse mode document and
-anything else that might claim the key. The script does nothing but hand the keystroke
-on, and NVDA ignores the keys it injects itself, so it cannot come back round.
+NVDA warns you about this by announcing the embedded document as it takes the focus.
+The add-on used to drop that announcement along with every other document title in a
+browser, which left no way to tell why finding had stopped working — the keyboard had
+quietly left the page.
+
+So `_shouldDropObjectSpeech` now drops a document title only when
+`_documentAnnouncementIsExpected()` says one is due: while a hooked document call is on
+the stack, while the load gate is open, or while a foreground window is being announced.
+Those three cover every announcement the add-on set out to remove. A document that names
+itself outside all three has taken the focus by itself, and is always spoken.
+
+The residual behaviour is the browser's, not the add-on's: control+F still will not open
+the find bar while an embedded document holds the focus. Press escape, or control+home
+and then shift+tab out of the frame, and control+F works again. What the add-on owes you
+is the announcement that tells you which situation you are in.
+
+## Tracing
+
+Off, and costing nothing, unless a file named `muteBrowseModeTrace.on` exists in your
+temp folder. While it does, every keystroke and focus change is appended to
+`muteBrowseModeTrace.log` beside it:
+
+```
+KEY kb(laptop):enter | script=browseMode…script_activatePosition on ChromeVBuf | focus: name='' role=0 class=Chrome_RenderWidgetHostHWND | ti=ChromeVBuf passThrough=False
+```
+
+Each line says which script NVDA resolved for the key, what had the focus, and whether
+browse mode was in pass-through. That is the question worth asking about this add-on,
+and NVDA's own log cannot answer it with logging turned off, which is the normal
+setting. Delete the marker file to stop. Any failure switches tracing off rather than
+propagating, so it can never be the thing that breaks a keystroke.
+
+## Control+F opens NVDA's find in a browser
+
+In a **web browser**, control+F opens NVDA's find. NVDA's find searches the browse mode
+document from where the cursor is and leaves the cursor on what it found, so the next
+line down is the line after the match and NVDA+F3 carries on from there. A browser's
+find bar only scrolls the page and puts the keyboard somewhere else entirely. It is also
+the one that keeps working: an embedded document holding the focus swallows the
+browser's control+F, but NVDA's find never leaves the buffer.
+
+Everything has to line up before the key is taken off the program — the setting is on,
+the focus is in a `CursorManager` tree interceptor (which is where NVDA defines
+`script_find`), that document is in browse mode rather than focus mode, and its root
+belongs to a web browser. That last test is what keeps Outlook and Word out: both render
+a message or a document as a browse mode document too, and control+F means Forward in
+one and Find in the other. Where NVDA has nothing to search — the address bar, or the
+browser's own find bar — the key is handed straight back with `gesture.send()`.
+
+The check box **"Control+F opens NVDA's find in a web browser"** in Browse Mode
+settings, ticked by default, turns it off. NVDA's find stays on NVDA+control+F either
+way.
+
+### Why the binding comes and goes
+
+`_syncBrowserFindBinding` adds and removes the control+F binding as the program in front
+changes, on every foreground *and* every focus change, rather than binding it once and
+handing the key back where it is not wanted.
+
+A bound key is trapped. `keyboardHandler.internal_keyDownEvent` returns False the moment
+`executeGesture` finds a script for it, so the real key down never reaches the program
+and `trappedKeys` swallows the key up as well. In a browser that is precisely the point.
+Anywhere else it is precisely wrong, because what the program would get instead is a
+synthetic keystroke injected from NVDA's main thread an event queue turn later, and a
+synthetic one is not the same as a real one:
+
+- `send()` drops any modifier `winUser.getKeyState` reports as already down, so what is
+  injected depends on how the key state looks from NVDA's own thread at that moment,
+  not on what you are holding;
+- a held control+F auto repeats, and every repeat queues another script and another
+  injection;
+- `send()` keeps `ignoreInjected` up only until the hook thread has seen the injected
+  keys or 10 ms have passed, and the key it waits for is `keys[0]`, the first modifier
+  rather than the last key up actually sent. Lose that race and NVDA reads its own
+  injection back as a real keystroke.
+
+Control+F is Forward in Outlook and has to arrive there as the key you actually pressed.
+Between 1.3 and 1.9 the add-on bound control+F system-wide to a script that did nothing
+but `gesture.send()`, which bought nothing at all — nothing in NVDA binds plain
+control+F, so it already reached every program. That is why it was removed in 2.0, and
+why it is back in 2.3 only where it earns its place.
 
 ## In Outlook and Chromium browsers
 
@@ -259,7 +339,11 @@ Outlook or in Chromium based browsers. There, NVDA also stops speaking:
 - **dialogs**, so opening an Outlook message no longer says the word "dialog". A
   message opens inside a dialog, and NVDA announces it while walking down the focus
   ancestors, which happens before the message document exists;
-- **document titles**, so a browser tab no longer announces the page title;
+- **document titles**, so a browser tab no longer announces the page title — but only
+  while a page is loading, while a document is being entered, or while a window you
+  have just switched to is being announced. See
+  [Documents that take the focus on their own](#documents-that-take-the-focus-on-their-own)
+  below;
 - **toasts and notification balloons**, such as a browser's download and pop-up
   messages;
 - **live region "flash" messages**, which is how web pages announce things like
@@ -281,7 +365,7 @@ NVDA+t for the title, NVDA+tab for the focus and NVDA+b for a whole dialog all u
 python build.py
 ```
 
-That writes `muteBrowseMode-1.9.nvda-addon` next to `build.py`. Open it to install,
+That writes `muteBrowseMode-2.3.nvda-addon` next to `build.py`. Open it to install,
 or drag it onto NVDA.
 
 ## How it works

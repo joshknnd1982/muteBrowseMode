@@ -195,15 +195,35 @@ waiting for it and started using it;</li>
 the page being read to you.</li>
 </ul>
 
-<h2>Control+F in Outlook</h2>
+<h2>Control+F</h2>
 
-<p>Control+F is now handed straight to whichever program you are in, and never claimed
-by NVDA. In Microsoft Outlook that means control+F forwards the message you are
-reading, which is what control+F does in Outlook. In a browser it opens the browser's
-own find bar.</p>
+<p>In a <strong>web browser</strong>, control+F opens NVDA's find. NVDA's find searches
+the page from where your cursor is and leaves the cursor on what it found, so the next
+line down is the line after the match, and NVDA+F3 carries on from there. A browser's
+find bar only scrolls the page and puts the keyboard somewhere else entirely.</p>
 
-<p><strong>NVDA's find is on NVDA+control+F</strong>, which is where NVDA itself puts
-it. NVDA+F3 and NVDA+shift+F3 still find the next and previous match.</p>
+<p>It is also the one that keeps working. An embedded document that has taken the focus
+swallows the browser's control+F, so the find bar silently refuses to open; NVDA's find
+has no such problem, because it never leaves the buffer.</p>
+
+<p><strong>Everywhere else control+F reaches the program untouched.</strong> In
+Microsoft Outlook it forwards the message you are reading, which is what control+F does
+in Outlook. In Word it is Word's find. In focus mode it belongs to whatever you are
+typing in, and where NVDA has nothing to search — the address bar, or the browser's own
+find bar — it goes straight back to the browser.</p>
+
+<p>The check box <strong>"Control+F opens NVDA's find in a web browser"</strong> in
+Browse Mode settings, ticked by default, turns this off. NVDA's find is on
+NVDA+control+F either way, with NVDA+F3 and NVDA+shift+F3 for the next and previous
+match.</p>
+
+<p>The binding is added and taken away as you move between programs, rather than being
+left in place and the key handed back. A key NVDA has a script for is trapped, so the
+real keystroke never reaches the program and what it gets instead is a synthetic one
+injected a moment later — which is not the same thing, and is not what should be
+arriving in Outlook when you forward a message. Between 1.3 and 1.9 the add-on did
+exactly that, for no benefit at all, and it is why the binding was removed in 2.0 before
+coming back in 2.3 with a job to do.</p>
 
 <h2>Outlook and Chromium browsers</h2>
 
@@ -247,15 +267,67 @@ setting off if you want the silence.</li>
 will still hear that short sound when a document is entered, because it is a sound
 rather than speech. Turn it off and NVDA speaks "browse mode" instead, which this
 add-on does silence.</li>
-<li>Commands to cycle each combo box, and the control+F pass through, are all in the
-Input Gestures dialog under "Mute Browse Mode". The two cycle commands have no gesture
-assigned by default.</li>
+<li>Commands to cycle each combo box are in the Input Gestures dialog under "Mute
+Browse Mode". Neither has a gesture assigned unless you assign one, and the add-on
+claims no keyboard shortcut of its own.</li>
 <li>A page with an enormous number of links is not counted all the way to the end, so
 that NVDA is never held up by it. The summary says "over 1500 links" when that
 happens.</li>
 </ul>
 
 <h2>Changes</h2>
+
+<h3>2.3</h3>
+<ul>
+<li>Control+F in a web browser now opens <strong>NVDA's</strong> find instead of the
+browser's own find bar. NVDA's find searches the page from where your cursor is and
+leaves the cursor on what it found, so the next line down is the line after the match,
+and NVDA+F3 carries on from there. It also keeps working where the browser's does not:
+an embedded document that has taken the focus swallows the browser's control+F, but
+NVDA's find never leaves the buffer.</li>
+<li>Only in a web browser, and only in browse mode. In Microsoft Outlook control+F is
+still Forward, in Word it is still Find, and in focus mode it still belongs to whatever
+you are typing in. Where NVDA has nothing to search — the address bar, or the browser's
+find bar itself — control+F is handed straight back to the browser.</li>
+<li>A new check box in Browse Mode settings, "Control+F opens NVDA's find in a web
+browser", ticked by default, turns it off again.</li>
+<li>NVDA's find is still on NVDA+control+F as well, with NVDA+F3 and NVDA+shift+F3 for
+the next and previous match.</li>
+</ul>
+
+<h3>2.2</h3>
+<ul>
+<li>Fixed the real cause of control+F and enter appearing to do nothing in Microsoft
+Edge. Some pages have an embedded document — an iframe, such as the "Image Magnify"
+frame on a product page — that takes the focus when you move the browse cursor near
+it, for instance with control+home or by arrowing up to the top. While the focus is
+inside one of those, the browser's own control+F never opens the find bar, and the
+enter you press afterwards is taken by browse mode as "activate what is under the
+cursor", so nothing happens. NVDA normally warns you by announcing the embedded
+document, but the add-on was dropping every document announcement in a browser, so
+there was nothing at all to say the keyboard had left the page.</li>
+<li>Document announcements are now dropped only at the moments the add-on exists for:
+while a page is loading, while a document is being entered, and while a window you
+have just switched to is being announced. A document that names itself outside all
+three has taken the focus on its own, and is now always spoken.</li>
+<li>Added an optional trace, off unless a file named
+<code>muteBrowseModeTrace.on</code> exists in your temp folder, which records every
+keystroke and focus change to <code>muteBrowseModeTrace.log</code> beside it. It is
+what found this, and it works with NVDA's own logging turned off.</li>
+</ul>
+
+<h3>2.0</h3>
+<ul>
+<li>Fixed enter doing nothing in Microsoft Edge's own find bar. Pressing control+F
+opened the find bar and you could type into it, but pressing enter did not run the
+search. The add-on had bound control+F to a script of its own since 1.3, which meant
+NVDA trapped the key and injected a synthetic one in its place instead of letting your
+keystroke through. The binding is gone. Nothing in NVDA binds plain control+F in the
+first place, so it already reached every program on its own, and it still forwards the
+message in Outlook and opens the find bar in a browser.</li>
+<li>The add-on no longer claims any keyboard shortcut. The two cycle commands are
+still in the Input Gestures dialog with no gesture assigned.</li>
+</ul>
 
 <h3>1.9</h3>
 <ul>

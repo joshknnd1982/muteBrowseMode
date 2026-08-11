@@ -39,6 +39,8 @@ braille, vision and NVDA's own caches carry on as usual.
 """
 
 import ctypes
+import os
+import tempfile
 import time
 
 import addonHandler
@@ -114,6 +116,7 @@ config.conf.spec[CONF_SECTION] = {
 	"pageSummary": 'option("speak", "tones", "normal", default="speak")',
 	"announceLoadingComplete": "boolean(default=True)",
 	"linksOnOwnLine": "boolean(default=False)",
+	"browserFind": "boolean(default=True)",
 }
 
 
@@ -186,6 +189,17 @@ def getLinksOnOwnLine():
 
 def setLinksOnOwnLine(enabled):
 	config.conf[CONF_SECTION]["linksOnOwnLine"] = bool(enabled)
+
+
+def getBrowserFind():
+	try:
+		return bool(config.conf[CONF_SECTION]["browserFind"])
+	except Exception:
+		return True
+
+
+def setBrowserFind(enabled):
+	config.conf[CONF_SECTION]["browserFind"] = bool(enabled)
 
 
 ### The applications we treat specially
@@ -378,6 +392,17 @@ _WINDOW_TITLE_ROLES = _members(
 	controlTypes.Role,
 	("WINDOW", "PANE", "FRAME", "INTERNALFRAME", "APPLICATION"),
 )
+
+#: The subset that names a document rather than a window. NVDA announces one of these
+#: when a page finishes loading and when a browser window is switched to, which is the
+#: noise this add-on exists to remove — but it announces the very same thing when the
+#: focus moves into an *embedded* document part way through a session, and that is not
+#: noise at all. It means the keyboard has gone somewhere the user did not put it, and
+#: while it is there the browser's own shortcuts may not reach the browser: an iframe
+#: that has taken the focus swallows control+F, so the find bar never opens and the
+#: enter that follows goes to browse mode instead. Silencing that left the user with no
+#: way to tell why finding had stopped working. See L{_documentAnnouncementIsExpected}.
+_DOCUMENT_TITLE_ROLES = _members(controlTypes.Role, ("DOCUMENT",))
 
 #: Roles used for toasts, flash messages and other transient announcements.
 _ALERT_ROLES = _members(controlTypes.Role, ("ALERT", "TOOLTIP", "HELPBALLOON", "NOTIFICATION"))
@@ -1621,6 +1646,59 @@ def _isEnteringDocument(self, args, kwargs):
 		return False
 
 
+def _isADifferentDocument(obj):
+	"""Whether C{obj} is a document other than the one the user is already reading.
+
+	Escaping out of the browser's find bar puts the focus back in the page, and NVDA
+	names the page on the way in. That is the title this add-on exists to silence, and
+	it is not news: it is where the user already was. An *embedded* document is news,
+	because the keyboard has gone somewhere they did not put it.
+
+	The two are told apart by asking the tree interceptor what document it is showing.
+	In Chromium an iframe shares one virtual buffer with the page that contains it, so
+	the page is the buffer's ``rootNVDAObject`` and the iframe is not.
+
+	Anything unclear answers True, so the announcement is made. Saying a title one time
+	too many is a small annoyance; not saying it is what left the user with no way to
+	tell why control+F had stopped opening the find bar.
+	"""
+	try:
+		treeInterceptor = api.getFocusObject().treeInterceptor
+	except Exception:
+		return True
+	root = getattr(treeInterceptor, "rootNVDAObject", None)
+	if root is None:
+		return True
+	try:
+		return obj != root
+	except Exception:
+		return True
+
+
+def _documentAnnouncementIsExpected():
+	"""Whether a document announcing itself right now is one of the moments we silence.
+
+	True while a hooked document call is on the stack, while a buffer is loading or has
+	just finished, and while a new foreground window is being announced. Those are the
+	three occasions this add-on exists for, and between them they cover every document
+	announcement it set out to remove: the page title on load, on entering a document,
+	and on switching to a browser window.
+
+	Outside all three there is nothing going on that would explain a document naming
+	itself, so it is not the page the user is already on — it is the focus moving into
+	a *different* document, an embedded one, while they were working. That has to be
+	heard. An iframe holding the focus swallows the browser's own control+F, so the
+	find bar silently refuses to open and the enter afterwards is taken by browse mode
+	as "activate what is under the cursor"; with the announcement dropped there was
+	nothing at all to say the keyboard had moved.
+	"""
+	if _inCallDepth > 0:
+		return True
+	if _gateUntil > 0.0 and time.monotonic() < _gateUntil:
+		return True
+	return _announcingNow()
+
+
 def _shouldDropObjectSpeech(args, kwargs):
 	"""True for the window, dialog and document titles and toasts we never want spoken.
 
@@ -1659,7 +1737,163 @@ def _shouldDropObjectSpeech(args, kwargs):
 		# nothing but the fragment the switcher got through. Outlook is the exception,
 		# because there the brief description of the focus takes the title's place.
 		return False
+	if (
+		role in _DOCUMENT_TITLE_ROLES
+		and not _documentAnnouncementIsExpected()
+		and _isADifferentDocument(obj)
+	):
+		# A document other than the one being read has named itself, while nothing was
+		# loading, nothing was being entered and no window had just been switched to.
+		# That is the focus landing in an embedded document the user did not go to, and
+		# it has to be spoken: it is the only warning that the keyboard has left the
+		# page, and that the browser's own find bar will not open until it comes back.
+		# Returning to the page itself, such as on escaping out of the find bar, is not
+		# this, and stays as silent as it has always been.
+		log.debug("Mute Browse Mode: another document took the focus, saying so")
+		return False
 	return True
+
+
+### NVDA's find in place of the browser's own
+#
+# NVDA's find is better than a browser's find bar for reading with: it searches the
+# browse mode document from the cursor and leaves the cursor on what it found, so the
+# next line is the line after the match, and NVDA+F3 carries on from there. A browser's
+# find bar puts the keyboard somewhere else entirely and only scrolls the page.
+#
+# It is also the one that keeps working. An embedded document that has taken the focus
+# swallows the browser's control+F, so the find bar silently refuses to open; NVDA's
+# find has no such problem, because it never leaves the buffer.
+#
+# Only in a web browser, and only where NVDA can actually search: Outlook's message body
+# is a browse mode document too, and control+F there is Forward.
+
+
+def _browseModeDocumentForFind():
+	"""The document NVDA's find would search, or C{None} if control+F is not ours.
+
+	Everything has to line up before the key is taken off the program:
+
+	* the setting is on;
+	* the focus is inside a browse mode document that can search — a C{CursorManager},
+	  which is where NVDA defines ``script_find``;
+	* that document is in browse mode rather than focus mode, because in focus mode the
+	  key belongs to whatever the user is typing in;
+	* and it belongs to a web browser. Outlook renders a message as a browse mode
+	  document as well, and Word does too, and control+F means Forward in both.
+	"""
+	if not getBrowserFind():
+		return None
+	try:
+		treeInterceptor = api.getFocusObject().treeInterceptor
+	except Exception:
+		return None
+	if not isinstance(treeInterceptor, cursorManager.CursorManager):
+		return None
+	if not getattr(treeInterceptor, "isReady", False):
+		return None
+	if getattr(treeInterceptor, "passThrough", False):
+		return None
+	if not _isWebBrowser(getattr(treeInterceptor, "rootNVDAObject", None)):
+		return None
+	return treeInterceptor
+
+
+### Tracing
+#
+# Off, and costing nothing, unless a marker file exists beside NVDA's own log. It is
+# here because the interesting question about this add-on is never "what did it say"
+# but "which of NVDA's handlers ran, and on what", and NVDA's log cannot answer that
+# when the user has logging turned off, which is the normal setting.
+#
+# Everything below is wrapped so that tracing can never be the thing that breaks a
+# keystroke: any failure switches tracing off rather than propagating.
+
+_TRACE_MARKER = os.path.join(tempfile.gettempdir(), "muteBrowseModeTrace.on")
+_TRACE_PATH = os.path.join(tempfile.gettempdir(), "muteBrowseModeTrace.log")
+
+try:
+	_tracing = os.path.exists(_TRACE_MARKER)
+except Exception:
+	_tracing = False
+
+
+def _traceWrite(line):
+	global _tracing
+	if not _tracing:
+		return
+	try:
+		with open(_TRACE_PATH, "a", encoding="utf-8", errors="replace") as f:
+			f.write("%s %s\n" % (time.strftime("%H:%M:%S"), line))
+	except Exception:
+		# A trace that cannot be written must not keep trying on every keystroke.
+		_tracing = False
+
+
+def _describe(obj):
+	"""Name, role, window class and application of C{obj}, each one guarded."""
+	parts = []
+	for label, getter in (
+		("name", lambda: repr((obj.name or "")[:40])),
+		("role", lambda: str(obj.role)),
+		("class", lambda: _windowClassOf(obj)),
+		("app", lambda: _appNameOf(obj)),
+		("states", lambda: ",".join(sorted(str(s) for s in (obj.states or ())))[:80]),
+	):
+		try:
+			parts.append("%s=%s" % (label, getter()))
+		except Exception:
+			parts.append("%s=?" % label)
+	return " ".join(parts)
+
+
+def _describeScript(func):
+	if func is None:
+		return "script=None(passes to the program)"
+	try:
+		owner = getattr(func, "__self__", None)
+		return "script=%s.%s on %s" % (
+			getattr(func, "__module__", "?"),
+			getattr(func, "__qualname__", getattr(func, "__name__", "?")),
+			type(owner).__name__ if owner is not None else "-",
+		)
+	except Exception:
+		return "script=?"
+
+
+def _traceGesture(gesture):
+	"""One line saying what NVDA is about to do with this key, and to what."""
+	if not _tracing:
+		return
+	try:
+		identifier = "?"
+		try:
+			identifier = gesture.identifiers[0]
+		except Exception:
+			pass
+		try:
+			script = scriptHandler.findScript(gesture)
+		except Exception:
+			script = None
+		focus = None
+		try:
+			focus = api.getFocusObject()
+		except Exception:
+			pass
+		ti = getattr(focus, "treeInterceptor", None)
+		_traceWrite(
+			"KEY %s | %s | focus: %s | ti=%s passThrough=%s isReady=%s"
+			% (
+				identifier,
+				_describeScript(script),
+				_describe(focus) if focus is not None else "?",
+				type(ti).__name__ if ti is not None else "None",
+				getattr(ti, "passThrough", "-"),
+				getattr(ti, "isReady", "-"),
+			),
+		)
+	except Exception:
+		pass
 
 
 def _onGesture(*args, **kwargs):
@@ -1668,6 +1902,7 @@ def _onGesture(*args, **kwargs):
 	Registered with the decide_executeGesture extension point purely to get told
 	about input; it never vetoes a gesture.
 	"""
+	_traceGesture(kwargs.get("gesture", args[0] if args else None))
 	if _gateUntil > 0.0:
 		_closeGate()
 	# The user is driving again, so there is no window announcement left to wait for.
@@ -1727,6 +1962,14 @@ def _addChoices(panel, sHelper):
 		),
 	)
 	panel._muteBrowseModeLinksCheckBox.SetValue(getLinksOnOwnLine())
+	panel._muteBrowseModeFindCheckBox = sHelper.addItem(
+		wx.CheckBox(
+			panel,
+			# Translators: Label of a check box added to NVDA's Browse Mode settings.
+			label=_("Control+F opens NVDA's &find in a web browser"),
+		),
+	)
+	panel._muteBrowseModeFindCheckBox.SetValue(getBrowserFind())
 
 
 def _saveChoices(panel):
@@ -1746,6 +1989,9 @@ def _saveChoices(panel):
 	checkBox = getattr(panel, "_muteBrowseModeLinksCheckBox", None)
 	if checkBox is not None:
 		setLinksOnOwnLine(checkBox.IsChecked())
+	checkBox = getattr(panel, "_muteBrowseModeFindCheckBox", None)
+	if checkBox is not None:
+		setBrowserFind(checkBox.IsChecked())
 
 
 def _refreshChoices(panel):
@@ -1761,6 +2007,9 @@ def _refreshChoices(panel):
 	checkBox = getattr(panel, "_muteBrowseModeLinksCheckBox", None)
 	if checkBox is not None:
 		checkBox.SetValue(getLinksOnOwnLine())
+	checkBox = getattr(panel, "_muteBrowseModeFindCheckBox", None)
+	if checkBox is not None:
+		checkBox.SetValue(getBrowserFind())
 
 
 def _makeSettingsWrapper(original):
@@ -1773,6 +2022,7 @@ def _makeSettingsWrapper(original):
 			self._muteBrowseModeSummaryChoice = None
 			self._muteBrowseModeLoadingCheckBox = None
 			self._muteBrowseModeLinksCheckBox = None
+			self._muteBrowseModeFindCheckBox = None
 			log.error(
 				"Mute Browse Mode: could not add the controls to Browse Mode settings",
 				exc_info=True,
@@ -1844,6 +2094,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		#: dialog moving on to the next word says that one and a repeated focus event
 		#: does not say the same one twice.
 		self._lastSpellCheck = None
+		#: Whether control+F is currently bound to this plugin. Only true while a web
+		#: browser is the program in front; see L{_syncBrowserFindBinding}.
+		self._browserFindBound = False
 
 		try:
 			# Gating speech itself, rather than each announcement, catches every route
@@ -1877,6 +2130,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			self._gestureHandlerRegistered = True
 		except Exception:
 			log.error("Mute Browse Mode: could not hook input gestures", exc_info=True)
+
+		# NVDA may well be starting with a browser already in front, in which case no
+		# foreground change is coming to tell us about it.
+		self._syncBrowserFindBinding()
 
 		try:
 			_patchBrowseModePanel()
@@ -2016,6 +2273,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		event that follows is answered with a brief description of where the user has
 		landed, in place of NVDA's own report.
 		"""
+		self._syncBrowserFindBinding(obj)
 		try:
 			isOutlook = _isOutlook(obj)
 			if getMode() != MODE_NORMAL:
@@ -2037,6 +2295,17 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		exactly as they would have been; only the speech is replaced. If the brief
 		report cannot be built, nothing is replaced and NVDA speaks as usual.
 		"""
+		self._syncBrowserFindBinding(obj)
+		if _tracing:
+			ti = getattr(obj, "treeInterceptor", None)
+			_traceWrite(
+				"FOCUS %s | ti=%s passThrough=%s"
+				% (
+					_describe(obj),
+					type(ti).__name__ if ti is not None else "None",
+					getattr(ti, "passThrough", "-"),
+				),
+			)
 		if time.monotonic() < self._outlookArrivalUntil and _isOutlook(obj):
 			try:
 				role = getattr(obj, "role", None)
@@ -2200,25 +2469,67 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 	@scriptHandler.script(
 		description=_(
 			# Translators: Description of a command, shown in the Input Gestures dialog.
-			"Passes control+F straight to the program, so that it forwards the current "
-			"message in Microsoft Outlook. NVDA's own find stays on NVDA+control+F",
+			"In a web browser, opens NVDA's find instead of the browser's own find bar. "
+			"Anywhere else control+F reaches the program untouched",
 		),
-		gesture="kb:control+f",
 	)
-	def script_passThroughControlF(self, gesture):
-		"""Make sure control+F belongs to the application and never to NVDA.
+	def script_browserFind(self, gesture):
+		"""Control+F in a web page opens NVDA's find.
 
-		In Microsoft Outlook control+F is Forward, and it has to reach Outlook for the
-		message to be forwarded. Binding it here rather than leaving it unbound is what
-		guarantees that: a global plugin script is the first thing NVDA looks at, ahead
-		of the browse mode document and everything else that might otherwise claim the
-		key, and this one does nothing but hand the keystroke on. NVDA ignores the keys
-		it injects itself, so this cannot come back round.
+		Bound to control+F, but only while a browser is the program in front — see
+		L{_syncBrowserFindBinding} for why the binding comes and goes rather than
+		staying put.
 
-		Nothing is lost elsewhere: control+F reaching the program is exactly what a
-		browser's or an editor's find bar wants too. NVDA's find is unaffected, because
-		NVDA binds that to NVDA+control+F.
+		Where NVDA cannot search, the key is handed straight back to the program. That
+		covers the browser's own chrome: pressing control+F while the focus is already
+		in the find bar, or in the address bar, does what it always did.
 		"""
-		if outlookIsCurrent():
-			log.debug("Mute Browse Mode: passing control+F to Outlook to forward the message")
-		gesture.send()
+		treeInterceptor = _browseModeDocumentForFind()
+		if treeInterceptor is None:
+			log.debug("Mute Browse Mode: nothing to find in, control+F goes to the program")
+			gesture.send()
+			return
+		log.debug("Mute Browse Mode: opening NVDA's find in place of the browser's")
+		treeInterceptor.script_find(gesture)
+
+	def _syncBrowserFindBinding(self, obj=None):
+		"""Claim control+F only while the user is in a web browser.
+
+		A bound key is trapped. ``keyboardHandler.internal_keyDownEvent`` returns False
+		the moment ``executeGesture`` finds a script for it, so the real key down never
+		reaches the program and the matching key up is swallowed too, by way of
+		``trappedKeys``. In a browser that is exactly what is wanted, because the whole
+		point is to take control+F off the browser. Everywhere else it is exactly what
+		is not wanted: control+F is Forward in Microsoft Outlook, and it has to arrive
+		there as the keystroke the user actually pressed.
+
+		Hence binding and unbinding as the program in front changes, rather than leaving
+		the binding in place and handing the key back with ``gesture.send()``. That would
+		put a synthetic keystroke in front of every other program on the system, and a
+		synthetic one is not the same as a real one: ``send()`` drops any modifier
+		``winUser.getKeyState`` reports as already down, a held control+F auto repeats
+		into one injection per repeat, and the 10 ms window ``send()`` allows for NVDA to
+		recognise its own injection can be missed under load, after which NVDA reads the
+		injection back as a real keystroke.
+
+		Re-checked on every focus change as well as every foreground change, so that the
+		binding is in place well before the user can reach for the key. If it ever is not,
+		the cost is one control+F opening the browser's own find bar.
+		"""
+		try:
+			if obj is None:
+				obj = api.getForegroundObject()
+			wanted = bool(getBrowserFind() and _isWebBrowser(obj))
+		except Exception:
+			wanted = False
+		if wanted == self._browserFindBound:
+			return
+		try:
+			if wanted:
+				self.bindGesture("kb:control+f", "browserFind")
+			else:
+				self.removeGestureBinding("kb:control+f")
+			self._browserFindBound = wanted
+			log.debug("Mute Browse Mode: control+F %s" % ("claimed" if wanted else "released"))
+		except Exception:
+			log.error("Mute Browse Mode: could not change the control+F binding", exc_info=True)
