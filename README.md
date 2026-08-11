@@ -79,6 +79,18 @@ Everything else about the document is left exactly as NVDA has it, and any diffi
 all falls straight back to NVDA's own line movement. `resumeSayAllMode` is carried onto
 the wrappers, so say all still resumes from an arrow key.
 
+### Control+F opens NVDA's find in a web browser
+
+A check box, ticked by default. Control+F in a web browser opens NVDA's find instead of
+the browser's own find bar.
+
+### Bring up NVDA screen reader find when not in Outlook
+
+A check box, unticked by default. Widens the one above from web browsers to everywhere
+except Microsoft Outlook, where control+F stays Forward. Where both are ticked this one
+wins. See [Control+F opens NVDA's find](#controlf-opens-nvdas-find-in-a-browser) for
+what "everywhere" covers.
+
 Both combo boxes also have a cycle command in the Input Gestures dialog under
 "Mute Browse Mode", with no gesture assigned by default.
 
@@ -286,23 +298,42 @@ find bar only scrolls the page and puts the keyboard somewhere else entirely. It
 the one that keeps working: an embedded document holding the focus swallows the
 browser's control+F, but NVDA's find never leaves the buffer.
 
-Everything has to line up before the key is taken off the program — the setting is on,
-the focus is in a `CursorManager` tree interceptor (which is where NVDA defines
-`script_find`), that document is in browse mode rather than focus mode, and its root
-belongs to a web browser. That last test is what keeps Outlook and Word out: both render
-a message or a document as a browse mode document too, and control+F means Forward in
-one and Find in the other. Where NVDA has nothing to search — the address bar, or the
-browser's own find bar — the key is handed straight back with `gesture.send()`.
+Everything has to line up before the key is taken off the program — one of the two check
+boxes below covers this program, the focus is in a `CursorManager` tree interceptor
+(which is where NVDA defines `script_find`), and that document is in browse mode rather
+than focus mode. Where NVDA has nothing to search — the address bar, or the browser's own
+find bar — the key is handed straight back with `gesture.send()`.
 
-The check box **"Control+F opens NVDA's find in a web browser"** in Browse Mode
-settings, ticked by default, turns it off. NVDA's find stays on NVDA+control+F either
-way.
+### The two check boxes
+
+| Check box | Default | Where control+F opens NVDA's find |
+| --- | --- | --- |
+| Control+F opens NVDA's find in a web browser | ticked | Web browsers only |
+| Bring up NVDA screen reader find when not in Outlook | unticked | Everywhere except Microsoft Outlook |
+
+The second is a widening of the first, so where both are ticked the second wins and
+everywhere the first reached is still reached. Untick both and control+F always goes to
+the program. NVDA's find stays on NVDA+control+F either way.
+
+**Outlook is the exception in both cases.** Control+F is Forward there, and it has to
+arrive as the key you actually pressed. `_isWebBrowser` rules Outlook out before anything
+else in its own right, because the new Outlook for Windows is a WebView2 application and
+looks exactly like Chromium from the outside.
+
+**"Everywhere" is bounded by where NVDA can search at all.** `CursorManager` — the mix-in
+that defines `script_find` — appears in `browseMode` and in Kindle, PowerPoint, MSN, OCR
+results and UIA web content, and nowhere else. A Word document is not one of them, so
+control+F in Microsoft Word is still Word's own find whatever these check boxes say.
 
 ### Why the binding comes and goes
 
-`_syncBrowserFindBinding` adds and removes the control+F binding as the program in front
-changes, on every foreground *and* every focus change, rather than binding it once and
-handing the key back where it is not wanted.
+`_syncBrowserFindBinding` adds and removes the control+F binding on every foreground
+*and* every focus change, rather than binding it once and handing the key back where it
+is not wanted. The test it makes is the same one the script makes: is there a browse mode
+document here that NVDA's find could search, in a program the check boxes cover. Keying
+the binding to that rather than to the program alone is what keeps the key off everything
+else — Word, the address bar and the browser's own find bar are never bound, so nothing
+is ever injected into them.
 
 A bound key is trapped. `keyboardHandler.internal_keyDownEvent` returns False the moment
 `executeGesture` finds a script for it, so the real key down never reaches the program
@@ -365,7 +396,7 @@ NVDA+t for the title, NVDA+tab for the focus and NVDA+b for a whole dialog all u
 python build.py
 ```
 
-That writes `muteBrowseMode-2.3.nvda-addon` next to `build.py`. Open it to install,
+That writes `muteBrowseMode-2.4.nvda-addon` next to `build.py`. Open it to install,
 or drag it onto NVDA.
 
 ## How it works

@@ -117,6 +117,7 @@ config.conf.spec[CONF_SECTION] = {
 	"announceLoadingComplete": "boolean(default=True)",
 	"linksOnOwnLine": "boolean(default=False)",
 	"browserFind": "boolean(default=True)",
+	"findWhenNotOutlook": "boolean(default=False)",
 }
 
 
@@ -200,6 +201,17 @@ def getBrowserFind():
 
 def setBrowserFind(enabled):
 	config.conf[CONF_SECTION]["browserFind"] = bool(enabled)
+
+
+def getFindWhenNotOutlook():
+	try:
+		return bool(config.conf[CONF_SECTION]["findWhenNotOutlook"])
+	except Exception:
+		return False
+
+
+def setFindWhenNotOutlook(enabled):
+	config.conf[CONF_SECTION]["findWhenNotOutlook"] = bool(enabled)
 
 
 ### The applications we treat specially
@@ -1769,20 +1781,45 @@ def _shouldDropObjectSpeech(args, kwargs):
 # is a browse mode document too, and control+F there is Forward.
 
 
+def _findIsOursIn(obj):
+	"""Whether control+F belongs to NVDA's find in the program C{obj} is part of.
+
+	Two check boxes, the second a widening of the first:
+
+	* "Control+F opens NVDA's find in a web browser" — browsers only. C{_isWebBrowser}
+	  rules Outlook out before anything else, because the new Outlook for Windows is a
+	  WebView2 application and looks exactly like Chromium from the outside;
+	* "Bring up NVDA screen reader find when not in Outlook" — everywhere except
+	  Outlook. This one wins where both are ticked, being the broader of the two, and
+	  everywhere it reaches is somewhere the narrower one already reached.
+
+	Outlook is the exception either way, because control+F is Forward there and has to
+	arrive as the key the user actually pressed.
+	"""
+	if obj is None:
+		return False
+	if getFindWhenNotOutlook():
+		return not _isOutlook(obj)
+	if getBrowserFind():
+		return _isWebBrowser(obj)
+	return False
+
+
 def _browseModeDocumentForFind():
 	"""The document NVDA's find would search, or C{None} if control+F is not ours.
 
 	Everything has to line up before the key is taken off the program:
 
-	* the setting is on;
+	* one of the two find check boxes covers the program this is (L{_findIsOursIn});
 	* the focus is inside a browse mode document that can search — a C{CursorManager},
-	  which is where NVDA defines ``script_find``;
+	  which is where NVDA defines ``script_find``. Outside NVDA's own browse mode that
+	  is Kindle, PowerPoint, an OCR result and UIA web content, and nothing else: a
+	  Word document is not one, so control+F in Word stays Word's own find whatever
+	  these check boxes say;
 	* that document is in browse mode rather than focus mode, because in focus mode the
-	  key belongs to whatever the user is typing in;
-	* and it belongs to a web browser. Outlook renders a message as a browse mode
-	  document as well, and Word does too, and control+F means Forward in both.
+	  key belongs to whatever the user is typing in.
 	"""
-	if not getBrowserFind():
+	if not (getBrowserFind() or getFindWhenNotOutlook()):
 		return None
 	try:
 		treeInterceptor = api.getFocusObject().treeInterceptor
@@ -1794,7 +1831,7 @@ def _browseModeDocumentForFind():
 		return None
 	if getattr(treeInterceptor, "passThrough", False):
 		return None
-	if not _isWebBrowser(getattr(treeInterceptor, "rootNVDAObject", None)):
+	if not _findIsOursIn(getattr(treeInterceptor, "rootNVDAObject", None)):
 		return None
 	return treeInterceptor
 
@@ -1970,6 +2007,14 @@ def _addChoices(panel, sHelper):
 		),
 	)
 	panel._muteBrowseModeFindCheckBox.SetValue(getBrowserFind())
+	panel._muteBrowseModeFindAnywhereCheckBox = sHelper.addItem(
+		wx.CheckBox(
+			panel,
+			# Translators: Label of a check box added to NVDA's Browse Mode settings.
+			label=_("Bring up NVDA screen reader find when &not in Outlook"),
+		),
+	)
+	panel._muteBrowseModeFindAnywhereCheckBox.SetValue(getFindWhenNotOutlook())
 
 
 def _saveChoices(panel):
@@ -1992,6 +2037,9 @@ def _saveChoices(panel):
 	checkBox = getattr(panel, "_muteBrowseModeFindCheckBox", None)
 	if checkBox is not None:
 		setBrowserFind(checkBox.IsChecked())
+	checkBox = getattr(panel, "_muteBrowseModeFindAnywhereCheckBox", None)
+	if checkBox is not None:
+		setFindWhenNotOutlook(checkBox.IsChecked())
 
 
 def _refreshChoices(panel):
@@ -2010,6 +2058,9 @@ def _refreshChoices(panel):
 	checkBox = getattr(panel, "_muteBrowseModeFindCheckBox", None)
 	if checkBox is not None:
 		checkBox.SetValue(getBrowserFind())
+	checkBox = getattr(panel, "_muteBrowseModeFindAnywhereCheckBox", None)
+	if checkBox is not None:
+		checkBox.SetValue(getFindWhenNotOutlook())
 
 
 def _makeSettingsWrapper(original):
@@ -2023,6 +2074,7 @@ def _makeSettingsWrapper(original):
 			self._muteBrowseModeLoadingCheckBox = None
 			self._muteBrowseModeLinksCheckBox = None
 			self._muteBrowseModeFindCheckBox = None
+			self._muteBrowseModeFindAnywhereCheckBox = None
 			log.error(
 				"Mute Browse Mode: could not add the controls to Browse Mode settings",
 				exc_info=True,
@@ -2094,8 +2146,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		#: dialog moving on to the next word says that one and a repeated focus event
 		#: does not say the same one twice.
 		self._lastSpellCheck = None
-		#: Whether control+F is currently bound to this plugin. Only true while a web
-		#: browser is the program in front; see L{_syncBrowserFindBinding}.
+		#: Whether control+F is currently bound to this plugin. Only true where there is
+		#: a browse mode document NVDA's find could search; see
+		#: L{_syncBrowserFindBinding}.
 		self._browserFindBound = False
 
 		try:
@@ -2273,7 +2326,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		event that follows is answered with a brief description of where the user has
 		landed, in place of NVDA's own report.
 		"""
-		self._syncBrowserFindBinding(obj)
+		self._syncBrowserFindBinding()
 		try:
 			isOutlook = _isOutlook(obj)
 			if getMode() != MODE_NORMAL:
@@ -2295,7 +2348,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		exactly as they would have been; only the speech is replaced. If the brief
 		report cannot be built, nothing is replaced and NVDA speaks as usual.
 		"""
-		self._syncBrowserFindBinding(obj)
+		self._syncBrowserFindBinding()
 		if _tracing:
 			ti = getattr(obj, "treeInterceptor", None)
 			_traceWrite(
@@ -2476,7 +2529,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 	def script_browserFind(self, gesture):
 		"""Control+F in a web page opens NVDA's find.
 
-		Bound to control+F, but only while a browser is the program in front — see
+		Bound to control+F, but only where NVDA has a document to search — see
 		L{_syncBrowserFindBinding} for why the binding comes and goes rather than
 		staying put.
 
@@ -2492,8 +2545,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		log.debug("Mute Browse Mode: opening NVDA's find in place of the browser's")
 		treeInterceptor.script_find(gesture)
 
-	def _syncBrowserFindBinding(self, obj=None):
-		"""Claim control+F only while the user is in a web browser.
+	def _syncBrowserFindBinding(self):
+		"""Claim control+F only where NVDA actually has a document to search.
 
 		A bound key is trapped. ``keyboardHandler.internal_keyDownEvent`` returns False
 		the moment ``executeGesture`` finds a script for it, so the real key down never
@@ -2512,14 +2565,21 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		recognise its own injection can be missed under load, after which NVDA reads the
 		injection back as a real keystroke.
 
+		The test is the same one the script itself makes: is there a browse mode document
+		here that NVDA's find could search, in a program these settings cover. Keying the
+		binding to that rather than to the program alone is what keeps the key off
+		everything else. Microsoft Word has no such document, so control+F there stays
+		Word's own find and arrives as a real keystroke, and so does control+F in the
+		browser's address bar or in its find bar — none of them are ever bound, so none
+		of them are ever injected.
+
 		Re-checked on every focus change as well as every foreground change, so that the
-		binding is in place well before the user can reach for the key. If it ever is not,
-		the cost is one control+F opening the browser's own find bar.
+		binding is in place well before the user can reach for the key. If it ever is not
+		— a page whose buffer has not finished loading, say — the cost is one control+F
+		opening the program's own find instead, which is what it would have done anyway.
 		"""
 		try:
-			if obj is None:
-				obj = api.getForegroundObject()
-			wanted = bool(getBrowserFind() and _isWebBrowser(obj))
+			wanted = _browseModeDocumentForFind() is not None
 		except Exception:
 			wanted = False
 		if wanted == self._browserFindBound:

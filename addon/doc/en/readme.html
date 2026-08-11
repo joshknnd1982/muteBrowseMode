@@ -212,10 +212,23 @@ in Outlook. In Word it is Word's find. In focus mode it belongs to whatever you 
 typing in, and where NVDA has nothing to search — the address bar, or the browser's own
 find bar — it goes straight back to the browser.</p>
 
-<p>The check box <strong>"Control+F opens NVDA's find in a web browser"</strong> in
-Browse Mode settings, ticked by default, turns this off. NVDA's find is on
-NVDA+control+F either way, with NVDA+F3 and NVDA+shift+F3 for the next and previous
-match.</p>
+<p>Two check boxes in Browse Mode settings control this:</p>
+
+<ul>
+<li><strong>"Control+F opens NVDA's find in a web browser"</strong>, ticked by default —
+browsers only.</li>
+<li><strong>"Bring up NVDA screen reader find when not in Outlook"</strong>, unticked by
+default — everywhere except Microsoft Outlook. Where both are ticked this one wins,
+being the wider of the two. Untick both and control+F always reaches the program.</li>
+</ul>
+
+<p>"Everywhere" means everywhere NVDA has a browse mode document to search, which
+outside a browser is Kindle, PowerPoint, an OCR result and UIA web content. A Word
+document is not one of those, so control+F in Microsoft Word remains Word's own find
+whatever these check boxes say.</p>
+
+<p>NVDA's find is on NVDA+control+F either way, with NVDA+F3 and NVDA+shift+F3 for the
+next and previous match.</p>
 
 <p>The binding is added and taken away as you move between programs, rather than being
 left in place and the key handed back. A key NVDA has a script for is trapped, so the
@@ -276,6 +289,23 @@ happens.</li>
 </ul>
 
 <h2>Changes</h2>
+
+<h3>2.4</h3>
+<ul>
+<li>New check box in Browse Mode settings: <strong>"Bring up NVDA screen reader find
+when not in Outlook"</strong>, unticked by default. Tick it and control+F opens NVDA's
+find everywhere except Microsoft Outlook, rather than only in a web browser. Where both
+find check boxes are ticked this one wins, being the wider of the two.</li>
+<li>Outlook is still the exception, because control+F is Forward there.</li>
+<li>It reaches everywhere NVDA has a browse mode document to search, which outside a
+browser means Kindle, PowerPoint, an OCR result and UIA web content. A Word document is
+not one of those, so control+F in Microsoft Word is still Word's own find whatever these
+check boxes say.</li>
+<li>Control+F is now claimed only where there really is a document for NVDA to search,
+rather than wherever the program qualifies. So the address bar, the browser's own find
+bar and every program without a browse mode document keep receiving control+F as the key
+you actually pressed, with nothing injected in its place.</li>
+</ul>
 
 <h3>2.3</h3>
 <ul>
