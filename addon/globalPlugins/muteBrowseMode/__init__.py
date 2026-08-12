@@ -228,6 +228,21 @@ _OUTLOOK_APP_NAMES = frozenset((
 	"msoutlook",
 ))
 
+#: Window classes Outlook gives its own top level windows: one class for the classic
+#: desktop Outlook's main window and for every message opened in a window of its own,
+#: and the host window the new Outlook for Windows puts its interface inside.
+#:
+#: These are here because the executable behind the object with the focus is not always
+#: Outlook even when Outlook is the program the user is in. Outlook renders more and
+#: more of itself in an embedded Edge web view — in the newest builds the message body
+#: as well — and every window a web view makes belongs to msedgewebview2.exe, which is a
+#: different process from Outlook's own and is Chromium by every test there is. The top
+#: level window is the one thing that is still Outlook's, whatever is embedded in it.
+_OUTLOOK_WINDOW_CLASSES = frozenset((
+	"rctrl_renwnd32",  # classic Outlook: the main window and every message window
+	"Outlook Host",  # the new Outlook for Windows
+))
+
 #: Executable names of Chromium based browsers. The window class check below catches
 #: nearly all of them on its own; this is for objects with no usable window class.
 _CHROMIUM_APP_NAMES = frozenset((
@@ -306,23 +321,89 @@ def _windowClassOf(obj):
 		return ""
 
 
-def _targetOf(obj):
-	"""Which of the two applications C{obj} belongs to, or C{None} for anything else."""
-	if obj is None:
-		return None
-	appName = _appNameOf(obj)
-	if appName in _OUTLOOK_APP_NAMES:
-		return TARGET_OUTLOOK
-	if appName in _CHROMIUM_APP_NAMES:
-		return TARGET_CHROMIUM
-	if _windowClassOf(obj) in _CHROMIUM_WINDOW_CLASSES:
-		return TARGET_CHROMIUM
-	return None
-
-
 def _isOutlook(obj):
-	"""Whether C{obj} belongs to any version of Microsoft Outlook."""
+	"""Whether C{obj} itself belongs to any version of Microsoft Outlook."""
 	return obj is not None and _appNameOf(obj) in _OUTLOOK_APP_NAMES
+
+
+def _rootWindowOf(obj):
+	"""The handle of the top level window C{obj} sits in, or 0 for none."""
+	try:
+		hwnd = obj.windowHandle
+	except Exception:
+		return 0
+	if not hwnd:
+		return 0
+	try:
+		import winUser
+
+		return winUser.getAncestor(hwnd, getattr(winUser, "GA_ROOT", 2)) or 0
+	except Exception:
+		return 0
+
+
+def _processIDOf(obj):
+	"""The process C{obj} belongs to, or C{None} if it will not say."""
+	try:
+		return obj.processID
+	except Exception:
+		return None
+
+
+def _appNameOfProcess(processID):
+	"""The application a process is, named the way L{_appNameOf} names one.
+
+	Asked of NVDA's own table of running applications, which is keyed by process and
+	already holds an entry for every program NVDA has looked at. So this is a dictionary
+	lookup for the window in front, and only walks the process list — which is what makes
+	the question expensive — for a process NVDA has never seen before.
+	"""
+	if not processID:
+		return ""
+	try:
+		import appModuleHandler
+
+		return (appModuleHandler.getAppModuleFromProcessID(processID).appName or "").lower()
+	except Exception:
+		return ""
+
+
+def _isInOutlookWindow(obj):
+	"""Whether C{obj} is anywhere inside a window belonging to Microsoft Outlook.
+
+	L{_isOutlook} asks what application the object belongs to, and that is no longer the
+	same question. Outlook renders parts of itself in an embedded Edge web view, and the
+	newest builds render the message body in one too: everything inside it belongs to
+	msedgewebview2.exe, names that as its application, and is indistinguishable from a
+	Chromium browser by every test the add-on makes. That is what took control+F off
+	Outlook and opened NVDA's find in the middle of a message.
+
+	The window the user is looking at is the answer to that. Whatever is embedded inside
+	it, the top level window is Outlook's own, and it says so twice over: by its class,
+	and by the process that owns it.
+
+	Runs on every focus change, so it stops as soon as it has an answer. Where the top
+	level window belongs to the same program as the object itself — which is every
+	ordinary window, embedded or not — the process is not looked up at all: that question
+	was answered on the first line.
+	"""
+	if _isOutlook(obj):
+		return True
+	root = _rootWindowOf(obj)
+	if not root:
+		return False
+	try:
+		import winUser
+
+		if winUser.getClassName(root) in _OUTLOOK_WINDOW_CLASSES:
+			return True
+		processID = winUser.getWindowThreadProcessID(root)[0]
+	except Exception:
+		log.debugWarning("Mute Browse Mode: could not read the top level window", exc_info=True)
+		return False
+	if not processID or processID == _processIDOf(obj):
+		return False
+	return _appNameOfProcess(processID) in _OUTLOOK_APP_NAMES
 
 
 def outlookIsCurrent(obj=None):
@@ -333,31 +414,56 @@ def outlookIsCurrent(obj=None):
 	is checked first: a document belonging to Outlook counts as Outlook even in the
 	moment before its window has become the foreground one.
 
-	The answer is only ever written to NVDA's log. Nothing here reaches the
-	synthesiser, so the check itself is never heard.
+	Each of the three is judged by the window it is in rather than by the process it
+	belongs to, because an Outlook message body may be an embedded web view and so belong
+	to another process altogether. See L{_isInOutlookWindow}.
+
+	Nothing here reaches the synthesiser, so the check itself is never heard.
 	"""
-	if _isOutlook(obj):
+	if obj is not None and _isInOutlookWindow(obj):
 		return True
 	for getter in (api.getForegroundObject, api.getFocusObject):
 		try:
 			candidate = getter()
 		except Exception:
 			continue
-		if _isOutlook(candidate):
+		if _isInOutlookWindow(candidate):
 			return True
 	return False
+
+
+def _targetOf(obj):
+	"""Which of the two applications C{obj} belongs to, or C{None} for anything else.
+
+	Outlook is asked first and by the window, because an Outlook message rendered in an
+	embedded web view answers every Chromium test there is — see L{_isInOutlookWindow}.
+	The two are not interchangeable here: a browser window being switched to is read out
+	in full, and an Outlook one is not.
+	"""
+	if obj is None:
+		return None
+	if _isInOutlookWindow(obj):
+		return TARGET_OUTLOOK
+	if _appNameOf(obj) in _CHROMIUM_APP_NAMES:
+		return TARGET_CHROMIUM
+	if _windowClassOf(obj) in _CHROMIUM_WINDOW_CLASSES:
+		return TARGET_CHROMIUM
+	return None
 
 
 def _isWebBrowser(obj):
 	"""Whether C{obj} belongs to a browser or an Electron application, and not Outlook.
 
-	Outlook is excluded before anything else, because the new Outlook for Windows is a
-	WebView2 application and so looks exactly like Chromium from the outside.
+	Outlook is excluded before anything else, and by the window it is in: the new Outlook
+	for Windows is a WebView2 application, and the classic one now renders the message
+	itself in a web view, so both look exactly like Chromium from the outside.
 	"""
-	if obj is None or _isOutlook(obj):
+	if obj is None:
 		return False
-	if _targetOf(obj) == TARGET_CHROMIUM:
-		return True
+	target = _targetOf(obj)
+	if target is not None:
+		# Chromium, or an Outlook that is only wearing Chromium's clothes.
+		return target == TARGET_CHROMIUM
 	if _appNameOf(obj) in _GECKO_APP_NAMES:
 		return True
 	return _windowClassOf(obj) in _GECKO_WINDOW_CLASSES
@@ -1074,8 +1180,12 @@ def _isOutlookMessageBody(obj):
 
 	A body the user cannot type into, such as the one in the reading pane, is never
 	announced, because the announcement invites them to type.
+
+	Whether this is Outlook at all is asked of the window rather than of the object: the
+	web view branch below exists for an Outlook built on one, and everything inside a web
+	view belongs to another process entirely. See L{_isInOutlookWindow}.
 	"""
-	if not _isOutlook(obj):
+	if not _isInOutlookWindow(obj):
 		return False
 	if getattr(obj, "role", None) not in _BODY_ROLES:
 		return False
@@ -1145,7 +1255,7 @@ def _outlookSpellCheckField(obj):
 	when it belongs to the same window as the focus: a Word surface sitting in some
 	dialog elsewhere in Outlook is not the one being looked at.
 	"""
-	if not _isOutlook(obj):
+	if not _isInOutlookWindow(obj):
 		return None
 	if _windowClassOf(obj) == _WORD_DIALOG_WINDOW_CLASS:
 		return obj
@@ -1257,11 +1367,15 @@ _SPLIT_CONTROL_ROLES = _members(
 
 
 def _isVirtualBufferOutlookMessage(textInfo):
-	"""Whether this text is an Outlook message rendered as a web document."""
+	"""Whether this text is an Outlook message rendered as a web document.
+
+	Which is Outlook's own web view, so the document belongs to msedgewebview2.exe and
+	only the window it is in says Outlook. See L{_isInOutlookWindow}.
+	"""
 	buffer = getattr(textInfo, "obj", None)
 	if buffer is None or not getattr(buffer, "VBufHandle", None):
 		return False
-	return _isOutlook(getattr(buffer, "rootNVDAObject", None))
+	return _isInOutlookWindow(getattr(buffer, "rootNVDAObject", None))
 
 
 def _shouldSplitLines(textInfo):
@@ -1337,7 +1451,7 @@ def _shouldWalkSegments(treeInterceptor):
 	if getattr(treeInterceptor, "VBufHandle", None):
 		# A web document, where the line offsets above have already done the job.
 		return False
-	return _isOutlook(getattr(treeInterceptor, "rootNVDAObject", None))
+	return _isInOutlookWindow(getattr(treeInterceptor, "rootNVDAObject", None))
 
 
 def _isSplittableControl(field):
@@ -1784,22 +1898,30 @@ def _shouldDropObjectSpeech(args, kwargs):
 def _findIsOursIn(obj):
 	"""Whether control+F belongs to NVDA's find in the program C{obj} is part of.
 
-	Two check boxes, the second a widening of the first:
+	Microsoft Outlook is ruled out first and on its own, because control+F is Forward
+	there and has to arrive as the key the user actually pressed. Neither check box
+	reaches into Outlook and neither can be made to.
 
-	* "Control+F opens NVDA's find in a web browser" — browsers only. C{_isWebBrowser}
-	  rules Outlook out before anything else, because the new Outlook for Windows is a
-	  WebView2 application and looks exactly like Chromium from the outside;
-	* "Bring up NVDA screen reader find when not in Outlook" — everywhere except
-	  Outlook. This one wins where both are ticked, being the broader of the two, and
-	  everywhere it reaches is somewhere the narrower one already reached.
+	The test for it is L{outlookIsCurrent}, which asks what window the user is in, and
+	not what application the focused object says it belongs to. Those were the same
+	question until Outlook began rendering its own message body in an embedded Edge web
+	view: everything inside one belongs to msedgewebview2.exe and is Chromium by every
+	test there is, so a message being read looked exactly like a web page, and control+F
+	in it opened NVDA's find instead of forwarding the message. See L{_isInOutlookWindow}.
 
-	Outlook is the exception either way, because control+F is Forward there and has to
-	arrive as the key the user actually pressed.
+	Then, of what is left, two check boxes, the second a widening of the first:
+
+	* "Control+F opens NVDA's find in a web browser" — browsers only;
+	* "Bring up NVDA screen reader find when not in Outlook" — everywhere else. This one
+	  wins where both are ticked, being the broader of the two, and everywhere it reaches
+	  is somewhere the narrower one already reached.
 	"""
 	if obj is None:
 		return False
+	if outlookIsCurrent(obj):
+		return False
 	if getFindWhenNotOutlook():
-		return not _isOutlook(obj)
+		return True
 	if getBrowserFind():
 		return _isWebBrowser(obj)
 	return False
@@ -2029,14 +2151,33 @@ def _traceWrite(line):
 		_tracing = False
 
 
+def _rootWindowClassOf(obj):
+	"""The class of the top level window C{obj} is in, for the trace to show.
+
+	Two user32 calls and nothing else, so it is safe to ask from the input hook thread,
+	which is where gestures are traced from. It is worth a field of its own because the
+	application an object belongs to is no longer the application it is *in* — an Outlook
+	message body rendered in a web view says msedgewebview2, and only the window it sits
+	in says Outlook.
+	"""
+	try:
+		import winUser
+
+		root = _rootWindowOf(obj)
+		return winUser.getClassName(root) if root else ""
+	except Exception:
+		return "?"
+
+
 def _describe(obj):
-	"""Name, role, window class and application of C{obj}, each one guarded."""
+	"""Name, role, window classes and application of C{obj}, each one guarded."""
 	parts = []
 	for label, getter in (
 		("name", lambda: repr((obj.name or "")[:40])),
 		("role", lambda: str(obj.role)),
 		("class", lambda: _windowClassOf(obj)),
 		("app", lambda: _appNameOf(obj)),
+		("rootClass", lambda: _rootWindowClassOf(obj)),
 		("states", lambda: ",".join(sorted(str(s) for s in (obj.states or ())))[:80]),
 	):
 		try:
@@ -2528,7 +2669,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		"""
 		self._syncBrowserFindBinding()
 		try:
-			isOutlook = _isOutlook(obj)
+			isOutlook = _isInOutlookWindow(obj)
 			if getMode() != MODE_NORMAL:
 				# In normal mode nothing is being silenced, so there is nothing to
 				# stand down and no reason to touch NVDA's speech at all.
@@ -2559,7 +2700,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 					getattr(ti, "passThrough", "-"),
 				),
 			)
-		if time.monotonic() < self._outlookArrivalUntil and _isOutlook(obj):
+		if time.monotonic() < self._outlookArrivalUntil and _isInOutlookWindow(obj):
 			try:
 				role = getattr(obj, "role", None)
 				if role in _TRANSIENT_FOCUS_ROLES:
@@ -2740,7 +2881,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		"""
 		target = _findTarget()
 		if target is None:
+			# The key belongs to the program, and reaching this at all means the binding
+			# has outlived whatever it was made for — Outlook most of all, where control+F
+			# is Forward. So put the binding down before handing the key on, and the next
+			# press is a real keystroke rather than another injected one.
 			log.debug("Mute Browse Mode: nothing to find in, control+F goes to the program")
+			self._syncBrowserFindBinding()
 			gesture.send()
 			return
 		log.debug("Mute Browse Mode: opening NVDA's find on %r" % target)
@@ -2792,5 +2938,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 				self.removeGestureBinding("kb:control+f")
 			self._browserFindBound = wanted
 			log.debug("Mute Browse Mode: control+F %s" % ("claimed" if wanted else "released"))
+			if _tracing:
+				# Only when the answer changes, and only on the main thread. Which program
+				# the add-on thinks it is in is the whole of this decision, and the one
+				# thing a keystroke trace cannot show on its own.
+				_traceWrite(
+					"FIND control+F %s | outlookIsCurrent=%s"
+					% ("claimed" if wanted else "released", outlookIsCurrent()),
+				)
 		except Exception:
 			log.error("Mute Browse Mode: could not change the control+F binding", exc_info=True)

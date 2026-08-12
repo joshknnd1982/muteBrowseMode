@@ -289,6 +289,20 @@ and NVDA's own log cannot answer it with logging turned off, which is the normal
 setting. Delete the marker file to stop. Any failure switches tracing off rather than
 propagating, so it can never be the thing that breaks a keystroke.
 
+`app=` is the application the focused object belongs to and `rootClass=` is the class of
+the top level window it sits in, which are no longer the same answer: in an Outlook
+message body that Outlook renders in a web view they read `app=msedgewebview2` and
+`rootClass=rctrl_renwnd32`. Control+F is settled by the second of those, so a line saying
+`FIND control+F claimed` or `released`, with the add-on's verdict on the program beside
+it, is written whenever the binding changes hands:
+
+```
+FIND control+F released | outlookIsCurrent=True
+```
+
+In Microsoft Outlook the key must never be claimed, and a `KEY kb:control+f` line there
+must say `script=None(passes to the program)`.
+
 ## Control+F opens NVDA's find in a browser
 
 In a **web browser**, control+F opens NVDA's find. NVDA's find searches the browse mode
@@ -345,9 +359,46 @@ the program. NVDA's find stays on NVDA+control+F either way.
 message you are reading, and that is as true of the message body, the subject line and
 the address fields as it is of the message list — all of them are edit boxes or browse
 mode buffers that would otherwise qualify. `_findSource` tests for Outlook before it
-tests for anything else, and neither check box can override it. `_isWebBrowser` rules
-Outlook out in its own right as well, because the new Outlook for Windows is a WebView2
-application and looks exactly like Chromium from the outside.
+tests for anything else, and neither check box can override it.
+
+### Which program is this, when the message body is a web page
+
+The test for Outlook is `outlookIsCurrent`, which asks **what window the user is in**,
+not what application the object with the focus says it belongs to. Those used to be the
+same question. They are not any more: Outlook renders more and more of itself in an
+embedded Edge web view, and the newest builds render the message body in one too. Every
+window a web view makes belongs to `msedgewebview2.exe` — a different process from
+Outlook's own, with a Chromium window class, and Chromium by every test this add-on can
+make of it. So a message being read in Outlook 2024 looked exactly like a web page in
+Edge, control+F was taken off Outlook as if it were a browser, and NVDA's find opened in
+the middle of a message instead of forwarding it. That was the 2.9 fix.
+
+`_isInOutlookWindow` answers it from the window instead, and four separate signals have
+to fail before Outlook is missed:
+
+- the object's own application, as before — enough for the classic message list, the
+  address fields, and a body Word renders;
+- the class of the **top level window** it sits in. Classic Outlook gives one class,
+  `rctrl_renwnd32`, to its main window and to every message opened in a window of its
+  own; the new Outlook for Windows calls its host window `Outlook Host`. Whatever is
+  embedded inside, that window is still Outlook's;
+- the process that **owns that top level window**, asked of NVDA's own table of running
+  applications — a dictionary lookup for the window in front, so it costs nothing on the
+  focus changes this runs on;
+- and failing all three, the foreground window itself, which is Outlook's own top level
+  window and says so.
+
+**Everything the add-on does in Outlook is asked the same way as of 2.9**, because every
+one of them had the same hole in it. A message rendered as a web page now gets the
+message body announcement, gets its links put on their own line, gets its window title
+dropped on switching to it rather than read out as though it were a browser window, gets
+the brief description of where the focus landed when you switch to Outlook — and does not
+get the page summary, which is a browser's and was the one piece already gated on the
+program rather than on the object. `_targetOf` asks the window too, so an Outlook web
+view is Outlook and not Chromium, and `_isWebBrowser` follows from it.
+
+None of it reaches a real browser: the test is the top level window, and a browser's is
+the browser's own.
 
 ### Why the binding comes and goes
 
@@ -420,7 +471,7 @@ NVDA+t for the title, NVDA+tab for the focus and NVDA+b for a whole dialog all u
 python build.py
 ```
 
-That writes `muteBrowseMode-2.7.nvda-addon` next to `build.py`. Open it to install,
+That writes `muteBrowseMode-2.9.nvda-addon` next to `build.py`. Open it to install,
 or drag it onto NVDA.
 
 ## How it works

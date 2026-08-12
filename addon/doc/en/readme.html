@@ -212,6 +212,20 @@ in Outlook. In Word it is Word's find. In focus mode it belongs to whatever you 
 typing in, and where NVDA has nothing to search — the address bar, or the browser's own
 find bar — it goes straight back to the browser.</p>
 
+<p>Which program you are in is worked out from the window, not from the part of it your
+cursor happens to be in. This matters in Outlook: newer builds draw the message you are
+reading with the same engine Edge uses, so the message body reports itself as belonging
+to Edge rather than to Outlook, and until 2.9 that was enough for control+F to be taken
+for a web page's and open NVDA's find in the middle of a message. It stays Forward now in
+every version of Outlook, in the message list, the message body, the subject line and the
+address fields alike.</p>
+
+<p>Everything else the add-on does in Outlook is worked out the same way as of 2.9, so a
+message drawn that way is still an Outlook message: it is announced as the message body
+when you tab into it, its links go on their own line, its window title is not read out
+when you switch to it, and switching to Outlook still answers with the brief description
+of where you have landed. A page in a real web browser is unaffected by any of it.</p>
+
 <p>Two check boxes in Browse Mode settings control this:</p>
 
 <ul>
