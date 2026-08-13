@@ -40,6 +40,7 @@ braille, vision and NVDA's own caches carry on as usual.
 
 import ctypes
 import os
+import re
 import tempfile
 import time
 
@@ -59,6 +60,7 @@ import textInfos
 import tones
 import ui
 import virtualBuffers
+import winUser
 import wx
 from gui import guiHelper, settingsDialogs
 from logHandler import log
@@ -469,6 +471,89 @@ def _isWebBrowser(obj):
 	return _windowClassOf(obj) in _GECKO_WINDOW_CLASSES
 
 
+### The column headings the Outlook message list reads out
+#
+# A row of the Outlook message list is announced one column at a time, and each column
+# is read out with its heading in front of it: "unread, From MacDailyNews, Subject Amy
+# Sedaris joins Ben Stiller". The subject is the one column that never needs saying: it
+# is the line of the message the user came to hear, it is by far the longest thing on
+# the row, and the heading in front of it is repeated on every single message.
+#
+# Only a heading standing in front of something is dropped, which is what keeps the
+# subject *field* on a message being written: NVDA speaks that as its own item in the
+# sequence, "Subject:" or "Subject" with the value following separately, and neither is
+# a heading with the value run on behind it.
+
+#: Column headings dropped from the front of a cell, lower case.
+_SUPPRESSED_COLUMN_LABELS = ("subject",)
+
+#: A heading at the start of an item or straight after a comma, with a value behind it.
+_COLUMN_LABEL_RE = re.compile(
+	r"(^|[,;]\s*)(?:%s)\s+(?=\S)" % "|".join(_SUPPRESSED_COLUMN_LABELS),
+	re.IGNORECASE,
+)
+
+
+def _isOutlookRowFocus():
+	"""Whether the focus is on a row of one of Outlook's lists.
+
+	What keeps the heading filter off everything else. A line of message text that
+	happens to begin "subject to change" is read with the focus on the document, and the
+	subject field of a message being written is an edit box whose name is the bare word
+	with the value spoken separately after it, so neither of them is touched. Only the
+	thing that actually reads out a heading in front of every column is.
+
+	Asked two ways, because the message list is drawn differently in different versions
+	of Outlook and the role a row comes out as is not the same in all of them: the role
+	if it is one a row has, and otherwise whether the focus is carrying a heading and a
+	value run together in its own name, which is exactly what a row of columns is and
+	what nothing else in Outlook is.
+	"""
+	try:
+		focus = api.getFocusObject()
+	except Exception:
+		return False
+	if not _isInOutlookWindow(focus):
+		return False
+	if getattr(focus, "role", None) in _ROW_ROLES:
+		return True
+	try:
+		return bool(_COLUMN_LABEL_RE.search(focus.name or ""))
+	except Exception:
+		return False
+
+
+def _filterColumnLabels(args, kwargs):
+	"""Take the suppressed column headings out of a speech sequence, in Outlook only.
+
+	Where the focus is gets asked only once something has actually matched, so the
+	ordinary case — everywhere else, and every other utterance in Outlook — costs one
+	failed regular expression search per string and nothing else. Anything in the
+	sequence that is not a string is a speech command and is passed through untouched.
+	"""
+	if args:
+		sequence = args[0]
+	elif "speechSequence" in kwargs:
+		sequence = kwargs["speechSequence"]
+	else:
+		return args, kwargs
+	if not isinstance(sequence, list) or not sequence:
+		return args, kwargs
+	if not any(isinstance(item, str) and _COLUMN_LABEL_RE.search(item) for item in sequence):
+		return args, kwargs
+	if not _isOutlookRowFocus():
+		return args, kwargs
+	filtered = [
+		_COLUMN_LABEL_RE.sub(r"\1", item) if isinstance(item, str) else item
+		for item in sequence
+	]
+	if args:
+		return (filtered,) + tuple(args[1:]), kwargs
+	kwargs = dict(kwargs)
+	kwargs["speechSequence"] = filtered
+	return args, kwargs
+
+
 ### Roles and reasons
 
 def _members(enum, names):
@@ -524,6 +609,14 @@ _DOCUMENT_TITLE_ROLES = _members(controlTypes.Role, ("DOCUMENT",))
 
 #: Roles used for toasts, flash messages and other transient announcements.
 _ALERT_ROLES = _members(controlTypes.Role, ("ALERT", "TOOLTIP", "HELPBALLOON", "NOTIFICATION"))
+
+#: Roles a row of a list or a table has. The Outlook message list uses one of these
+#: whichever way it is being drawn, and it is the only thing whose announcement carries a
+#: heading in front of every column. See L{_isOutlookRowFocus}.
+_ROW_ROLES = _members(
+	controlTypes.Role,
+	("DATAITEM", "LISTITEM", "TREEVIEWITEM", "TABLEROW", "TABLECELL"),
+)
 
 #: Reasons that mean "NVDA decided to say this". Everything else is left alone: QUERY is
 #: the user asking with NVDA+tab, SAYALL and MESSAGE are explicit, and ONLYCACHE must
@@ -1237,13 +1330,27 @@ _SPELL_RATE_MULTIPLIER = 0.8
 #: Longer than this and whatever we found is not one misspelled word.
 _MAX_WORD_LENGTH = 60
 
+#: Punctuation taken off either end of what the checker has selected. The selection
+#: routinely takes in the full stop or the comma the error is sitting against, and the
+#: apostrophes and hyphens inside a word are left alone because they are part of it.
+_WORD_EDGE_PUNCTUATION = " \t\r\n.,;:!?\"'`()[]{}<>…«»„“”‘’-–—/\\|*_+=@#$%^&~"
+
 
 def _looksLikeWord(text):
-	"""Whether C{text} is one word, rather than a sentence or nothing at all."""
+	"""Whether C{text} is one word, rather than a sentence or nothing at all.
+
+	Punctuation on its own is not a word. Word keeps a selection in the message as the
+	dialog steps along, and at the end of a check that selection can be sitting on
+	nothing but the full stop the last sentence finished with — which is how the add-on
+	came to announce "Not in Dictionary: period". A misspelling has letters in it, so
+	that is what is asked for.
+	"""
 	word = (text or "").strip()
 	if not word or len(word) > _MAX_WORD_LENGTH:
 		return False
-	return not any(character.isspace() for character in word)
+	if any(character.isspace() for character in word):
+		return False
+	return any(character.isalpha() for character in word)
 
 
 def _outlookSpellCheckField(obj):
@@ -1299,7 +1406,7 @@ def _misspelledWord(field):
 			info = field.makeTextInfo(position)
 			if unit is not None:
 				info.expand(unit)
-			word = (info.text or "").strip()
+			word = (info.text or "").strip().strip(_WORD_EDGE_PUNCTUATION)
 		except Exception:
 			continue
 		if _looksLikeWord(word):
@@ -1308,8 +1415,22 @@ def _misspelledWord(field):
 
 
 def _spellingSpeech(word):
-	"""The word, then the word spelled out a fifth more slowly than usual."""
-	sequence = [word]
+	"""The label and the word, then the word spelled out a fifth more slowly than usual.
+
+	The shape JAWS uses: you are told that this is a word the checker does not know, you
+	are told which word, and then you are given it letter by letter slowly enough to
+	take it in.
+
+	The slower rate belongs to this one announcement rather than to the synthesiser, so
+	it cannot be left behind anywhere else, not even if the spelling is interrupted half
+	way through.
+	"""
+	sequence = [
+		# Translators: Said in the Outlook spelling window, in front of the word the
+		# checker has stopped on.
+		_("Not in Dictionary:"),
+		word,
+	]
 	getSpelling = getattr(speech, "getSpellingSpeech", None)
 	if getSpelling is None:
 		return sequence
@@ -1328,6 +1449,38 @@ def _spellingSpeech(word):
 def _announceMisspelledWord(word):
 	with _ownSpeech():
 		speech.speak(_spellingSpeech(word))
+
+
+#: What NVDA calls the state a disabled control is in, lower case, or C{None} where this
+#: NVDA does not name its states this way.
+try:
+	_UNAVAILABLE_TEXT = (_STATE_UNAVAILABLE.displayString or "").strip().lower() or None
+except Exception:
+	_UNAVAILABLE_TEXT = None
+	log.debugWarning("Mute Browse Mode: no name for the unavailable state", exc_info=True)
+
+
+def _isBareUnavailable(args, kwargs):
+	"""Whether a whole utterance is nothing but the word "unavailable".
+
+	Word disables the spelling dialog the moment the check is complete, and NVDA answers
+	that state change on whatever had the focus with that one word — immediately before
+	the add-on says the check has finished, which is why the user hears "unavailable,
+	spell check is complete". It says nothing the user can act on, and it is only ever
+	dropped while a check this add-on is following is actually in progress.
+	"""
+	if _UNAVAILABLE_TEXT is None:
+		return False
+	if args:
+		sequence = args[0]
+	elif "speechSequence" in kwargs:
+		sequence = kwargs["speechSequence"]
+	else:
+		return False
+	if not isinstance(sequence, list) or not sequence:
+		return False
+	text = " ".join(item for item in sequence if isinstance(item, str))
+	return text.strip().strip(_WORD_EDGE_PUNCTUATION).lower() == _UNAVAILABLE_TEXT
 
 
 ### Putting links on their own line in Outlook
@@ -2005,38 +2158,30 @@ class _TextFieldCursorManager(cursorManager.CursorManager):
 		Whether anything was found is read back from the caret afterwards rather than
 		guessed at: NVDA leaves it alone when there is no match.
 		"""
-		info = self.makeTextInfo(textInfos.POSITION_CARET)
-		if not info.find(text, reverse=reverse, caseSensitive=caseSensitive):
-			# Nothing found. Hand it back to NVDA, which owns the wording of that message
-			# and its translations into every language NVDA speaks. It searches once more
-			# and fails the same way; that only ever happens when there was nothing to
-			# find, so the repeat costs nothing worth saving.
-			super().doFindText(
-				text,
-				reverse=reverse,
-				caseSensitive=caseSensitive,
-				willSayAllResume=willSayAllResume,
-			)
-			return
-		# ``find`` leaves this collapsed on the match, so the caret goes exactly there.
-		self.selection = info
-		speech.cancelSpeech()
-		# Expanded from the match itself, not from reading the caret back afterwards.
-		# 2.6 did the latter and still spoke the wrong line: a caret read back out of a
-		# UIA control is not necessarily the position that was just written to it, and
-		# expanding from it inherits whatever it settled on. The match is the one thing
-		# here that is not in doubt.
-		line = info.copy()
-		line.expand(textInfos.UNIT_LINE)
-		cursorManager.CursorManager._lastFindText = text
-		cursorManager.CursorManager._lastCaseSensitivity = caseSensitive
+		try:
+			before = self.makeTextInfo(textInfos.POSITION_CARET)
+		except Exception:
+			before = None
+		super().doFindText(
+			text,
+			reverse=reverse,
+			caseSensitive=caseSensitive,
+			willSayAllResume=True,
+		)
 		if willSayAllResume:
+			# Say all is resuming and will do the reading; NVDA would have stayed quiet
+			# here too.
 			return
-		if _tracing:
-			try:
-				_traceWrite("FIND %r matched, speaking line %r" % (text, (line.text or "")[:120]))
-			except Exception:
-				pass
+		try:
+			after = self.makeTextInfo(textInfos.POSITION_CARET)
+			if before is not None and after.compareEndPoints(before, "startToStart") == 0:
+				# The caret has not moved, so there was no match and NVDA has said so.
+				return
+			line = after.copy()
+			line.expand(textInfos.UNIT_LINE)
+		except Exception:
+			log.debugWarning("Mute Browse Mode: could not read the line found", exc_info=True)
+			return
 		speech.speakTextInfo(line, reason=controlTypes.OutputReason.CARET)
 
 
@@ -2073,6 +2218,29 @@ def _findableTextField(obj):
 	return obj
 
 
+def _activeBrowseModeTreeInterceptor(focus):
+	"""The browse mode document interceptor at C{focus}, if there is a live one.
+
+	Ready, and in browse mode rather than passthrough — the same test L{_findSource}
+	uses to decide there is a document NVDA's own find could search.
+
+	Used on its own too, for a narrower question: does *any* browse mode document sit
+	under the focus, regardless of whether these settings want NVDA's find to open
+	here. A browse mode document binds control+F to NVDA's own find by default, Outlook
+	included, whether or not this add-on wants that — Outlook's message body is a
+	browse mode document like any other, and its default control+F has to be kept from
+	ever firing, not merely left unclaimed.
+	"""
+	treeInterceptor = getattr(focus, "treeInterceptor", None)
+	if (
+		isinstance(treeInterceptor, cursorManager.CursorManager)
+		and getattr(treeInterceptor, "isReady", False)
+		and not getattr(treeInterceptor, "passThrough", False)
+	):
+		return treeInterceptor
+	return None
+
+
 def _findSource():
 	"""What control+F would search here, as C{(kind, object)}, or C{None} for nothing.
 
@@ -2095,15 +2263,13 @@ def _findSource():
 		focus = api.getFocusObject()
 	except Exception:
 		return None
-	# Outlook first and without exception: control+F forwards the message there.
+	# Outlook first and without exception: control+F forwards the message there. The
+	# focus object is safe to judge on now, because L{outlookIsCurrent} asks which window
+	# it is in rather than which application it says it belongs to.
 	if not _findIsOursIn(focus):
 		return None
-	treeInterceptor = getattr(focus, "treeInterceptor", None)
-	if (
-		isinstance(treeInterceptor, cursorManager.CursorManager)
-		and getattr(treeInterceptor, "isReady", False)
-		and not getattr(treeInterceptor, "passThrough", False)
-	):
+	treeInterceptor = _activeBrowseModeTreeInterceptor(focus)
+	if treeInterceptor is not None:
 		# Browse mode, so search the whole document rather than the control the focus
 		# happens to be sitting on inside it.
 		return ("document", treeInterceptor)
@@ -2487,6 +2653,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		#: dialog moving on to the next word says that one and a repeated focus event
 		#: does not say the same one twice.
 		self._lastSpellCheck = None
+		#: After spell-check completion, suppress the automatic message-body announcement
+		#: that Outlook emits when focus returns to the message body.
+		self._suppressBodyUntil = 0.0
+		#: Short window for suppressing NVDA's separate automatic OK-button speech.
+		self._suppressSpellOkUntil = 0.0
 		#: Whether control+F is currently bound to this plugin. Only true where there is
 		#: a browse mode document NVDA's find could search; see
 		#: L{_syncBrowserFindBinding}.
@@ -2668,6 +2839,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		landed, in place of NVDA's own report.
 		"""
 		self._syncBrowserFindBinding()
+		# A window has changed, so the message body the user was last told about is no
+		# longer the one they are in. Coming back to a message announces it again, which
+		# matters now that NVDA's own announcement of the body is dropped: without this,
+		# switching away and back would land in the body in silence.
+		self._lastBodyWindow = None
 		try:
 			isOutlook = _isInOutlookWindow(obj)
 			if getMode() != MODE_NORMAL:
@@ -2700,6 +2876,76 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 					getattr(ti, "passThrough", "-"),
 				),
 			)
+		# While the Outlook spelling dialog is asking about a word, the focus event
+		# can still be delivered through the Word editing surface that contains the
+		# selected misspelling. NVDA's normal focus handler speaks that surface
+		# (including the surrounding document text) before our old post-handler
+		# _reportMisspelledWord() could speak the word. Detect the spelling surface
+		# BEFORE nextHandler() and run NVDA's handler under the hard mute.
+		# This is deliberately limited to an actual spelling-dialog Word surface, so
+		# ordinary Outlook message text is unaffected.
+		spellField = _outlookSpellCheckField(obj)
+		if spellField is not None:
+			word = _misspelledWord(spellField)
+			# The box holding the word is never worth NVDA's own announcement of it: it
+			# reads out the whole sentence the error sits in, and once the check has
+			# finished and Word has disabled the dialog it reads out "unavailable". So it
+			# is silenced whether or not there was a word to put in its place — where
+			# there is none, the dialog itself is about to say what has happened.
+			if word is not None or _windowClassOf(obj) == _WORD_DIALOG_WINDOW_CLASS:
+				with _hardMute():
+					nextHandler()
+				if word is not None:
+					seen = (getattr(spellField, "windowHandle", None), word)
+					if seen != self._lastSpellCheck:
+						self._lastSpellCheck = seen
+						log.debug("Mute Browse Mode: spelling checker is asking about %r" % word)
+						_announceMisspelledWord(word)
+				return
+
+		# If Outlook returns focus directly to the message body, silence NVDA's
+		# document/body speech BEFORE nextHandler() runs. Otherwise the document text
+		# has already been spoken by the time _reportMessageBody gets a chance to act.
+		if self._lastSpellCheck is not None and _isOutlookMessageBody(obj):
+			with _hardMute():
+				nextHandler()
+			self._lastSpellCheck = None
+			self._suppressBodyUntil = time.monotonic() + 2.0
+			self._suppressSpellOkUntil = time.monotonic() + 2.0
+			with _ownSpeech():
+				speech.speak([_("Spell check is complete."), _("OK button")])
+			return
+
+		# The spelling dialog's OK button must not be spoken by NVDA itself.
+		# We replace that default focus speech with the JAWS-style completion
+		# announcement below. This has to happen before nextHandler().
+		if self._isSpellCheckOk(obj):
+			with _hardMute():
+				nextHandler()
+			self._lastSpellCheck = None
+			self._suppressBodyUntil = time.monotonic() + 2.0
+			self._suppressSpellOkUntil = time.monotonic() + 2.0
+			with _ownSpeech():
+				speech.speak([_("Spell check is complete."), _("OK button")])
+			return
+
+		# Tabbing into the body of a message. NVDA announces the Word editing surface
+		# itself first — "document, page 1, section 1, blank" — and the add-on's own
+		# "you are now in the message body" only followed it, so the announcement this
+		# add-on exists to remove was still the first thing heard. Decided before
+		# nextHandler(), the same way the spelling dialog above is, so that it never
+		# reaches the synthesiser at all. Said afterwards, because the browse mode
+		# document a message body can be cancels speech on its way into focus mode and
+		# would cut off anything said first.
+		if getMode() != MODE_NORMAL and _isOutlookMessageBody(obj):
+			with _hardMute():
+				nextHandler()
+			# Outlook has settled on a real control, so there is no arrival left to
+			# describe: the body is where the user has landed, and it is about to say so.
+			self._outlookArrivalUntil = 0.0
+			self._reportMessageBody(obj)
+			return
+
 		if time.monotonic() < self._outlookArrivalUntil and _isInOutlookWindow(obj):
 			try:
 				role = getattr(obj, "role", None)
@@ -2723,6 +2969,26 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		self._reportMessageBody(obj)
 		self._reportMisspelledWord(obj)
 
+	def _isSpellCheckOk(self, obj):
+		"""Whether C{obj} is the spelling dialog's OK button for the current check."""
+		if self._lastSpellCheck is None or not _isInOutlookWindow(obj):
+			return False
+		try:
+			if getattr(obj, "role", None) != controlTypes.Role.BUTTON:
+				return False
+			name = (getattr(obj, "name", "") or "").strip().lower()
+			if name not in ("ok", "&ok"):
+				return False
+			lastWindow = self._lastSpellCheck[0]
+			window = getattr(obj, "windowHandle", None)
+			return (
+				window == lastWindow
+				or winUser.getAncestor(window, winUser.GA_ROOT)
+				== winUser.getAncestor(lastWindow, winUser.GA_ROOT)
+			)
+		except Exception:
+			return False
+
 	def _reportMessageBody(self, obj):
 		"""Say when the focus has reached an Outlook message body.
 
@@ -2740,6 +3006,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			if not _isOutlookMessageBody(obj):
 				self._lastBodyWindow = None
 				return
+			if time.monotonic() < self._suppressBodyUntil:
+				self._lastBodyWindow = getattr(obj, "windowHandle", None)
+				return
 			window = getattr(obj, "windowHandle", None)
 			if window is not None and window == self._lastBodyWindow:
 				# The same body raising a second focus event, not a new arrival.
@@ -2750,30 +3019,50 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			log.error("Mute Browse Mode: could not announce the message body", exc_info=True)
 
 	def _reportMisspelledWord(self, obj):
-		"""Say the word the Outlook spelling checker is asking about, then spell it.
+		"""Report each misspelling, and report completion when the dialog reaches OK.
 
-		Spelled a fifth more slowly than usual, which is done with a speech command
-		inside the announcement rather than by changing the synthesiser's rate, so it
-		lasts exactly as long as the spelling does and cannot be left behind anywhere
-		else even if the announcement is interrupted half way through.
+		The spelling dialog is a Word dialog embedded in Outlook. While it is asking
+		about a word, announce ``Not in Dictionary: <word>``. When the checker finishes,
+		focus lands on its OK button; that transition is the reliable completion point.
 		"""
 		try:
 			field = _outlookSpellCheckField(obj)
-			if field is None:
-				self._lastSpellCheck = None
+			if field is not None:
+				word = _misspelledWord(field)
+				if word is None:
+					return
+				seen = (getattr(field, "windowHandle", None), word)
+				if seen == self._lastSpellCheck:
+					return
+				self._lastSpellCheck = seen
+				log.debug("Mute Browse Mode: spelling checker is asking about %r" % word)
+				_announceMisspelledWord(word)
 				return
-			word = _misspelledWord(field)
-			if word is None:
-				return
-			seen = (getattr(field, "windowHandle", None), word)
-			if seen == self._lastSpellCheck:
-				# The same word again, from a second focus event on the same dialog.
-				return
-			self._lastSpellCheck = seen
-			log.debug("Mute Browse Mode: spelling checker is asking about %r" % word)
-			_announceMisspelledWord(word)
+
+			# Once the last misspelling has been handled, Outlook's spelling dialog
+			# moves focus to its OK button. Only treat an OK button in the same Word
+			# dialog as completion, so ordinary Outlook OK buttons are untouched.
+			if self._lastSpellCheck is not None and _isInOutlookWindow(obj):
+				role = getattr(obj, "role", None)
+				name = (getattr(obj, "name", "") or "").strip().lower()
+				if role == controlTypes.Role.BUTTON and name in ("ok", "&ok"):
+					lastWindow = self._lastSpellCheck[0]
+					try:
+						sameWindow = (
+							getattr(obj, "windowHandle", None) == lastWindow
+							or winUser.getAncestor(obj.windowHandle, winUser.GA_ROOT)
+							== winUser.getAncestor(lastWindow, winUser.GA_ROOT)
+						)
+					except Exception:
+						sameWindow = False
+					if sameWindow:
+						self._lastSpellCheck = None
+						self._suppressBodyUntil = time.monotonic() + 2.0
+						self._suppressSpellOkUntil = time.monotonic() + 2.0
+						with _ownSpeech():
+							speech.speak([_("Spell check is complete."), _("OK button")])
 		except Exception:
-			log.error("Mute Browse Mode: could not announce the misspelled word", exc_info=True)
+			log.error("Mute Browse Mode: could not announce the spelling state", exc_info=True)
 
 	def terminate(self):
 		_cancelSummary()
@@ -2791,12 +3080,29 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		_unpatchAll()
 		super().terminate()
 
+	def _spellCheckIsRunning(self):
+		"""Whether the Outlook spelling dialog is part way through a check we are following."""
+		return self._lastSpellCheck is not None or time.monotonic() < self._suppressSpellOkUntil
+
 	def _makeSpeakWrapper(self, original):
 		def speak(*args, **kwargs):
-			if getMode() != MODE_NORMAL and _isGated():
+			muting = getMode() != MODE_NORMAL
+			if muting and _isGated():
+				return
+			if muting and self._spellCheckIsRunning() and _isBareUnavailable(args, kwargs):
+				# The spelling dialog disabling itself on its way to saying it has
+				# finished. See L{_isBareUnavailable}.
 				return
 			if _tracing:
 				_traceSpeech(args, kwargs)
+			if muting:
+				try:
+					args, kwargs = _filterColumnLabels(args, kwargs)
+				except Exception:
+					log.debugWarning(
+						"Mute Browse Mode: could not filter the column headings",
+						exc_info=True,
+					)
 			if _announcingNow():
 				# Let the announcement tell us when it has actually been said, rather
 				# than guessing how long a window title takes to read out.
@@ -2833,8 +3139,33 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		cancelSpeech.__doc__ = getattr(original, "__doc__", None)
 		return cancelSpeech
 
+	def _shouldDropSpellCheckOkObjectSpeech(self, args, kwargs):
+		"""Drop NVDA's separate automatic OK-button speech after completion."""
+		if time.monotonic() >= self._suppressSpellOkUntil:
+			return False
+		obj = kwargs.get("obj", args[0] if args else None)
+		if obj is None or not _isInOutlookWindow(obj):
+			return False
+		if "reason" in kwargs:
+			reason = kwargs["reason"]
+		elif len(args) > 1:
+			reason = args[1]
+		else:
+			return False
+		if reason not in _AUTOMATIC_REASONS:
+			return False
+		try:
+			return (
+				obj.role == controlTypes.Role.BUTTON
+				and (getattr(obj, "name", "") or "").strip().lower() in ("ok", "&ok")
+			)
+		except Exception:
+			return False
+
 	def _makeSpeakObjectWrapper(self, original):
 		def speakObject(*args, **kwargs):
+			if self._shouldDropSpellCheckOkObjectSpeech(args, kwargs):
+				return
 			if _shouldDropObjectSpeech(args, kwargs):
 				return
 			return original(*args, **kwargs)
@@ -2866,18 +3197,22 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		description=_(
 			# Translators: Description of a command, shown in the Input Gestures dialog.
 			"In a web browser, opens NVDA's find instead of the browser's own find bar. "
-			"Anywhere else control+F reaches the program untouched",
+			"In Microsoft Outlook it stays Forward. Anywhere else control+F reaches the "
+			"program untouched",
 		),
 	)
 	def script_browserFind(self, gesture):
 		"""Control+F opens NVDA's find, in a browse mode document or in an edit box.
 
-		Bound to control+F, but only where NVDA has something to search — see
+		Bound to control+F whenever NVDA has something to search, and also whenever a
+		browse mode document is present but not wanted for searching — Microsoft
+		Outlook's message body, most notably — so that this script, not browse mode's
+		own default control+F binding, is the one that runs. See
 		L{_syncBrowserFindBinding} for why the binding comes and goes rather than
-		staying put, and L{_findSource} for what counts.
+		staying put, and L{_findSource} for what counts as something to search.
 
-		Where NVDA cannot search, the key is handed straight back to the program, so it
-		does whatever it always did.
+		Where NVDA cannot search, the key is sent back to the program explicitly, so it
+		does whatever it always did — Forward, in Outlook.
 		"""
 		target = _findTarget()
 		if target is None:
@@ -2921,14 +3256,31 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		of them are ever injected.
 
 		Re-checked on every focus change as well as every foreground change, so that the
-		binding is in place well before the user can reach for the key. If it ever is not
-		— a page whose buffer has not finished loading, say — the cost is one control+F
-		opening the program's own find instead, which is what it would have done anyway.
+		binding is in place well before the user can reach for the key.
+
+		Releasing the binding outright is only safe where nothing else is waiting to
+		catch control+F once this add-on lets go of it. That holds in Microsoft Word,
+		say, which has no browse mode document and so nothing at this layer to catch
+		the key at all — control+F reaches Word as the keystroke it always was. It does
+		not hold in Microsoft Outlook: the message body is a browse mode document too,
+		and browse mode binds its own control+F to NVDA's find by default, the same as
+		any web page. Letting go there does not hand the key to Outlook, it exposes
+		that default binding underneath — which is NVDA's find opening exactly where
+		Forward was wanted. So the binding stays claimed whenever a browse mode
+		document is present, whether or not these settings want NVDA's find to open on
+		it; L{script_browserFind} sends the real key through itself in that case,
+		which is the one situation this add-on cannot avoid ``send()`` for.
 		"""
 		try:
-			wanted = _findSource() is not None
+			focus = api.getFocusObject()
 		except Exception:
-			wanted = False
+			focus = None
+		try:
+			wantsOurFind = _findSource() is not None
+		except Exception:
+			wantsOurFind = False
+		hasDocumentToGuard = focus is not None and _activeBrowseModeTreeInterceptor(focus) is not None
+		wanted = wantsOurFind or hasDocumentToGuard
 		if wanted == self._browserFindBound:
 			return
 		try:
