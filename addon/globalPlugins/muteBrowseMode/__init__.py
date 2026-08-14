@@ -1330,6 +1330,13 @@ _SPELL_RATE_MULTIPLIER = 0.8
 #: Longer than this and whatever we found is not one misspelled word.
 _MAX_WORD_LENGTH = 60
 
+#: How long to wait before looking again for the word the dialog is asking about, in
+#: milliseconds, and how many times. Word puts the dialog on screen before it has
+#: selected the error in the message, so the first look — which happens as the dialog
+#: takes the focus — can come up empty, and the first word of a check was announced as
+#: nothing at all. They stop as soon as a word is found or the focus leaves the dialog.
+_SPELL_RETRY_DELAYS = (120, 300, 600)
+
 #: Punctuation taken off either end of what the checker has selected. The selection
 #: routinely takes in the full stop or the comma the error is sitting against, and the
 #: apostrophes and hyphens inside a word are left alone because they are part of it.
@@ -1434,21 +1441,33 @@ def _spellingSpeech(word):
 	getSpelling = getattr(speech, "getSpellingSpeech", None)
 	if getSpelling is None:
 		return sequence
-	if _EndUtteranceCommand is not None:
-		sequence.append(_EndUtteranceCommand())
-	if _RateCommand is not None:
-		sequence.append(_RateCommand(multiplier=_SPELL_RATE_MULTIPLIER))
-	sequence.extend(getSpelling(word))
-	if _RateCommand is not None:
-		# Back to the rate the user chose. The synthesiser is never reconfigured, so
-		# this cannot escape the one announcement even if it is interrupted.
-		sequence.append(_RateCommand())
-	return sequence
+	spelled = list(sequence)
+	try:
+		if _EndUtteranceCommand is not None:
+			spelled.append(_EndUtteranceCommand())
+		if _RateCommand is not None:
+			spelled.append(_RateCommand(multiplier=_SPELL_RATE_MULTIPLIER))
+		spelled.extend(getSpelling(word))
+		if _RateCommand is not None:
+			# Back to the rate the user chose. The synthesiser is never reconfigured, so
+			# this cannot escape the one announcement even if it is interrupted.
+			spelled.append(_RateCommand())
+	except Exception:
+		# Say the word even if it cannot be spelled out. Half an announcement is worth
+		# having; the dialog arriving in silence is not.
+		log.debugWarning("Mute Browse Mode: could not spell the word out", exc_info=True)
+		return sequence
+	return spelled
 
 
 def _announceMisspelledWord(word):
+	try:
+		sequence = _spellingSpeech(word)
+	except Exception:
+		log.error("Mute Browse Mode: could not build the spelling announcement", exc_info=True)
+		sequence = [word]
 	with _ownSpeech():
-		speech.speak(_spellingSpeech(word))
+		speech.speak(sequence)
 
 
 #: What NVDA calls the state a disabled control is in, lower case, or C{None} where this
@@ -1985,6 +2004,11 @@ def _shouldDropObjectSpeech(args, kwargs):
 	NVDA made on its own initiative.
 	"""
 	if getMode() == MODE_NORMAL:
+		return False
+	if _bypassDepth > 0:
+		# The add-on speaking for itself. Its own announcements are never the noise it
+		# was written to remove, and one of them is a deliberate stand-in for exactly the
+		# announcement this drops. See L{GlobalPlugin._sayTheBoxInstead}.
 		return False
 	obj = kwargs.get("obj", args[0] if args else None)
 	if obj is None:
@@ -2653,6 +2677,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		#: dialog moving on to the next word says that one and a repeated focus event
 		#: does not say the same one twice.
 		self._lastSpellCheck = None
+		#: Whether the focus was inside the spelling dialog last time we looked. A check
+		#: that starts while the last one is still remembered would otherwise have its
+		#: first word deduplicated away against it.
+		self._inSpellDialog = False
 		#: After spell-check completion, suppress the automatic message-body announcement
 		#: that Outlook emits when focus returns to the message body.
 		self._suppressBodyUntil = 0.0
@@ -2876,32 +2904,40 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 					getattr(ti, "passThrough", "-"),
 				),
 			)
-		# While the Outlook spelling dialog is asking about a word, the focus event
-		# can still be delivered through the Word editing surface that contains the
-		# selected misspelling. NVDA's normal focus handler speaks that surface
-		# (including the surrounding document text) before our old post-handler
-		# _reportMisspelledWord() could speak the word. Detect the spelling surface
-		# BEFORE nextHandler() and run NVDA's handler under the hard mute.
-		# This is deliberately limited to an actual spelling-dialog Word surface, so
-		# ordinary Outlook message text is unaffected.
+		# The F7 spelling dialog. NVDA's own report of the box holding the word is the
+		# whole sentence the error sits in, so it is answered here, before nextHandler,
+		# rather than added to afterwards. Everything else in the dialog — the
+		# suggestions, the buttons — is left to NVDA to report as usual, so tabbing
+		# around it works normally.
 		spellField = _outlookSpellCheckField(obj)
-		if spellField is not None:
+		if spellField is not None and not self._isSpellCheckOk(obj):
+			if not self._inSpellDialog:
+				# A check that has only just started. What the last one finished on must
+				# not be allowed to count as "already said" against the first word of
+				# this one, or opening the dialog on the same word twice running says it
+				# once.
+				self._inSpellDialog = True
+				self._lastSpellCheck = None
 			word = _misspelledWord(spellField)
-			# The box holding the word is never worth NVDA's own announcement of it: it
-			# reads out the whole sentence the error sits in, and once the check has
-			# finished and Word has disabled the dialog it reads out "unavailable". So it
-			# is silenced whether or not there was a word to put in its place — where
-			# there is none, the dialog itself is about to say what has happened.
-			if word is not None or _windowClassOf(obj) == _WORD_DIALOG_WINDOW_CLASS:
+			seen = (getattr(spellField, "windowHandle", None), word) if word is not None else None
+			isNewWord = seen is not None and seen != self._lastSpellCheck
+			if isNewWord or _windowClassOf(obj) == _WORD_DIALOG_WINDOW_CLASS:
 				with _hardMute():
 					nextHandler()
-				if word is not None:
-					seen = (getattr(spellField, "windowHandle", None), word)
-					if seen != self._lastSpellCheck:
-						self._lastSpellCheck = seen
-						log.debug("Mute Browse Mode: spelling checker is asking about %r" % word)
-						_announceMisspelledWord(word)
-				return
+			else:
+				nextHandler()
+			if isNewWord:
+				self._lastSpellCheck = seen
+				log.debug("Mute Browse Mode: spelling checker is asking about %r" % word)
+				_announceMisspelledWord(word)
+			elif word is None:
+				# The dialog is on screen before Word has picked the error out in the
+				# message, so at the moment it takes the focus there is nothing to read
+				# yet. That is what left the first word of a check announced as nothing
+				# at all. Look again in a moment rather than giving up on it.
+				self._lookAgainForTheWord(spellField, 0)
+			return
+		self._inSpellDialog = False
 
 		# If Outlook returns focus directly to the message body, silence NVDA's
 		# document/body speech BEFORE nextHandler() runs. Otherwise the document text
@@ -2968,6 +3004,73 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		nextHandler()
 		self._reportMessageBody(obj)
 		self._reportMisspelledWord(obj)
+
+	def _lookAgainForTheWord(self, field, attempt):
+		"""Ask the spelling dialog again for the word it is asking about.
+
+		The dialog takes the focus before Word has selected the error in the message, so
+		the word cannot always be read at the moment it arrives. Each look is scheduled
+		rather than waited for, so nothing is ever held up, and they stop as soon as the
+		focus leaves the dialog.
+		"""
+		if attempt >= len(_SPELL_RETRY_DELAYS):
+			return
+		core.callLater(_SPELL_RETRY_DELAYS[attempt], self._retryTheWord, field, attempt)
+
+	def _retryTheWord(self, field, attempt):
+		"""One of those later looks. See L{_lookAgainForTheWord}."""
+		try:
+			if not self._stillInSpellDialog(field):
+				return
+			word = _misspelledWord(field)
+			if word is None:
+				if attempt + 1 < len(_SPELL_RETRY_DELAYS):
+					self._lookAgainForTheWord(field, attempt + 1)
+				else:
+					self._sayTheBoxInstead(field)
+				return
+			seen = (getattr(field, "windowHandle", None), word)
+			if seen == self._lastSpellCheck:
+				return
+			self._lastSpellCheck = seen
+			log.debug("Mute Browse Mode: spelling checker is asking about %r" % word)
+			_announceMisspelledWord(word)
+		except Exception:
+			log.error("Mute Browse Mode: could not look again for the word", exc_info=True)
+
+	def _stillInSpellDialog(self, field):
+		"""Whether the focus is still in the spelling dialog C{field} belongs to.
+
+		A later look must never speak into a window the user has already moved on to.
+		"""
+		try:
+			focus = api.getFocusObject()
+		except Exception:
+			return False
+		current = _outlookSpellCheckField(focus)
+		if current is None:
+			return False
+		return getattr(current, "windowHandle", None) == getattr(field, "windowHandle", None)
+
+	def _sayTheBoxInstead(self, field):
+		"""Say what NVDA would have said, when no word could be worked out at all.
+
+		Only reached where the box holding the word was silenced and none of the later
+		looks found anything in it. Reading out the sentence the error sits in is not
+		what this add-on is for, but it is what NVDA has always done, and it is a great
+		deal better than the dialog arriving in silence.
+		"""
+		try:
+			focus = api.getFocusObject()
+		except Exception:
+			return
+		if _windowClassOf(focus) != _WORD_DIALOG_WINDOW_CLASS:
+			# Something else in the dialog has the focus, and NVDA has already reported
+			# it in the ordinary way.
+			return
+		log.debug("Mute Browse Mode: no word in the spelling dialog, saying the box")
+		with _ownSpeech():
+			speech.speakObject(focus, reason=controlTypes.OutputReason.FOCUS)
 
 	def _isSpellCheckOk(self, obj):
 		"""Whether C{obj} is the spelling dialog's OK button for the current check."""

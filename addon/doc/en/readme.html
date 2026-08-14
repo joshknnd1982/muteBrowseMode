@@ -185,8 +185,14 @@ type in, is left alone.</p>
 hear each one. Your speed goes back to normal straight afterwards, and nothing outside
 the spelling window is affected.</p>
 
-<p>Moving on to the next mistake tells you that one. Moving around inside the window does
-not say the same word twice.</p>
+<p>Moving on to the next mistake tells you that one. Moving around inside the window
+reads the buttons and the list of suggestions as usual, and does not say the same word
+over and over.</p>
+
+<p>The window opens a moment before Word has picked the mistake out in your email, so
+there is sometimes nothing to read at first. The add-on keeps looking for about a second
+until the word turns up. If it never does, you get NVDA's usual reading of the box
+instead, because that is better than silence.</p>
 
 <p>A full stop is not a spelling mistake. The checker sometimes stops with nothing but a
 full stop or a comma picked out, and that used to be read as "Not in Dictionary: period".
@@ -272,6 +278,19 @@ records every key you press, where you were when you pressed it, and everything 
 says. Delete the <code>.on</code> file and restart NVDA to switch it off again.</p>
 
 <h2>What has changed</h2>
+
+<h3>3.0.1</h3>
+<ul>
+<li>Fixed the first mistake of a spelling check not being said at all. The window opens
+before Word has picked the mistake out in your email, so at the moment it appears there
+is nothing to read yet, and the add-on went quiet instead of looking again. It now keeps
+looking for about a second.</li>
+<li>Opening the checker twice on the same word now says it both times.</li>
+<li>Tabbing around the spelling window reads the buttons and the list of suggestions as
+usual again.</li>
+<li>If the word can never be worked out, you get NVDA's usual reading of the box rather
+than silence.</li>
+</ul>
 
 <h3>3.0</h3>
 <ul>
