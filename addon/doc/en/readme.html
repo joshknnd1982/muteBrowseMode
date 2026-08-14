@@ -212,6 +212,28 @@ by assuming that any OK button in Outlook is this one. The window has to say bot
 is about spelling and that something has finished before the add-on will speak for it.
 Every other OK button in Outlook is left exactly as it was.</p>
 
+<p>You hear it once. That window announces itself more than once when it opens, and the
+add-on remembers which window it has already spoken for, so you are not told twice. It
+forgets as soon as you move away, so running a second check straight after the first
+tells you about that one too.</p>
+
+<h2>Checking for new mail</h2>
+
+<p>When Outlook fetches your mail it shows a progress bar, and NVDA reads it out a
+percentage at a time — "ten percent", "fifty percent", on to a hundred. The add-on used to
+swallow most of that. Every message that lands opens a document, and going quiet after a
+document opens is the whole point of this add-on, so the download carried on underneath in
+silence: it would start being read out and then stop part way, with nothing to tell you
+whether it had finished or given up.</p>
+
+<p>A progress bar is now always read out in full, right through to a hundred percent,
+however much else is going on. It is the opposite of the noise this add-on exists to
+remove: something is happening that you cannot see and are waiting on.</p>
+
+<p>How much of it you hear, and whether you get speech or beeps, is NVDA's own setting
+rather than this add-on's: it is in NVDA's Settings, under Object Presentation, called
+"Progress bar output". The add-on no longer gets in its way.</p>
+
 <h2>Swapping between windows</h2>
 
 <p>When you hold alt and press tab, NVDA tells you which window you have landed in. The
@@ -288,6 +310,19 @@ records every key you press, where you were when you pressed it, and everything 
 says. Delete the <code>.on</code> file and restart NVDA to switch it off again.</p>
 
 <h2>What has changed</h2>
+
+<h3>3.3</h3>
+<ul>
+<li>"Spell check is complete. OK button" was said twice. That window announces itself more
+than once when it opens, and the add-on answered every announcement. It now remembers
+which window it has spoken for and says it once. It forgets as soon as you move away, so a
+second check straight after the first still tells you about that one.</li>
+<li>The progress bar for fetching new mail is read out in full again, all the way to a
+hundred percent. Every message that lands opens a document, and the add-on goes quiet
+after a document opens, so the download was being read out and then going silent part way
+through. A progress bar is never the noise this add-on exists to remove — something is
+happening that you cannot see and are waiting on — so it is now always let through.</li>
+</ul>
 
 <h3>3.2</h3>
 <ul>

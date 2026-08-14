@@ -1954,6 +1954,95 @@ def _isBareUnavailable(args, kwargs):
 	return text.strip().strip(_WORD_EDGE_PUNCTUATION).lower() == _UNAVAILABLE_TEXT
 
 
+### The progress bar
+#
+# Outlook shows one while it fetches new mail, and NVDA reads it out a percentage at a
+# time: "ten percent", "twenty percent", on to a hundred. Those announcements were being
+# swallowed part of the way through. Each message that lands opens a document, every
+# document announcement holds the gate shut behind it, and the download carried on
+# silently underneath — so it would start being read out and then stop, with nothing to
+# say whether it had finished or given up.
+#
+# A progress bar is never the noise this add-on was written to remove. It is the opposite:
+# something is happening that the user cannot see and is waiting on. So it goes past the
+# gate, always.
+#
+# Getting it past takes one step more than usual, because NVDA does not speak it where it
+# decides to. ``behaviors.ProgressBar.event_valueChange`` *queues* ``speech.speakMessage``
+# on the event queue and returns, so wrapping that call in ``_ownSpeech`` would be over
+# and done with an event-queue turn before anything was said. What is wrapped instead is
+# the function being queued, so the bypass travels on the queue along with it.
+
+#: The stand-in for ``speech.speakMessage`` and the function it stands in for, kept so it
+#: is built once rather than on every tick of every progress bar.
+_progressSpeakMessage = (None, None)
+
+
+def _bypassingSpeakMessage(original):
+	"""``speech.speakMessage``, but never gated."""
+	global _progressSpeakMessage
+	if _progressSpeakMessage[0] is original:
+		return _progressSpeakMessage[1]
+
+	def speakMessage(*args, **kwargs):
+		with _ownSpeech():
+			return original(*args, **kwargs)
+
+	speakMessage.__name__ = "speakMessage"
+	speakMessage.__doc__ = getattr(original, "__doc__", None)
+	_progressSpeakMessage = (original, speakMessage)
+	return speakMessage
+
+
+def _describeProgress(obj):
+	"""A progress bar's value and whether NVDA counts it as being in front, for the trace.
+
+	Those two are the whole of why NVDA might say nothing about it of its own accord: a
+	bar that is not in the foreground is only reported when "report background progress
+	bars" is turned on in NVDA's own settings, which it is not by default.
+	"""
+	parts = []
+	for label, getter in (
+		("value", lambda: repr(obj.value)),
+		("inForeground", lambda: str(obj.isInForeground)),
+		("app", lambda: _appNameOf(obj)),
+	):
+		try:
+			parts.append("%s=%s" % (label, getter()))
+		except Exception:
+			parts.append("%s=?" % label)
+	return " ".join(parts)
+
+
+def _makeProgressBarWrapper(original):
+	"""``ProgressBar.event_valueChange``, with what it queues let past the gate.
+
+	The swap lasts for the length of one call on NVDA's main thread, which is where every
+	value change is handled, and it is undone whether or not that call succeeds. Nothing
+	else in NVDA can see it: the only thing that reads ``speech.speakMessage`` in between
+	is the call this is wrapping.
+	"""
+
+	def event_valueChange(self, *args, **kwargs):
+		if _tracing:
+			# Worth a line of its own: it is the one thing that tells "NVDA never
+			# offered a percentage" apart from "NVDA offered one and it was silenced".
+			_traceWrite("PROGRESS %s" % _describeProgress(self))
+		current = getattr(speech, "speakMessage", None)
+		if current is None or getMode() == MODE_NORMAL:
+			# Nothing is being silenced, so there is nothing to let past.
+			return original(self, *args, **kwargs)
+		speech.speakMessage = _bypassingSpeakMessage(current)
+		try:
+			return original(self, *args, **kwargs)
+		finally:
+			speech.speakMessage = current
+
+	event_valueChange.__name__ = "event_valueChange"
+	event_valueChange.__doc__ = getattr(original, "__doc__", None)
+	return event_valueChange
+
+
 ### Putting links on their own line in Outlook
 
 # NVDA already does this in a web browser: Browse Mode settings, "Use screen layout
@@ -3133,6 +3222,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		#: that starts while the last one is still remembered would otherwise have its
 		#: first word deduplicated away against it.
 		self._inSpellDialog = False
+		#: The window the end of a check was last announced for, so that a dialog raising
+		#: a second focus event for the same arrival does not say it twice. Forgotten as
+		#: soon as the focus goes anywhere else. See L{_finishSpellCheck}.
+		self._saidCompleteFor = None
 		#: After spell-check completion, suppress the automatic message-body announcement
 		#: that Outlook emits when focus returns to the message body.
 		self._suppressBodyUntil = 0.0
@@ -3168,6 +3261,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		# Each of the remaining hooks is optional and independent: if one of them does
 		# not fit this NVDA, the rest still do their job.
 		self._installDocumentHooks()
+		self._installProgressHook()
 		self._installNoiseHooks()
 
 		try:
@@ -3273,6 +3367,19 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			except Exception:
 				log.error("Mute Browse Mode: could not hook %s" % name, exc_info=True)
 
+	def _installProgressHook(self):
+		"""Let a progress bar past the gate. See the notes above L{_makeProgressBarWrapper}."""
+		try:
+			from NVDAObjects import behaviors
+
+			_patch(
+				behaviors.ProgressBar,
+				"event_valueChange",
+				_makeProgressBarWrapper(behaviors.ProgressBar.event_valueChange),
+			)
+		except Exception:
+			log.error("Mute Browse Mode: could not hook the progress bar", exc_info=True)
+
 	def _installNoiseHooks(self):
 		"""Live regions and alerts, silenced in Outlook and Chromium only.
 
@@ -3362,8 +3469,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		if self._isSpellCheckComplete(obj):
 			with _hardMute():
 				nextHandler()
-			self._finishSpellCheck()
+			self._finishSpellCheck(obj)
 			return
+		# The focus is somewhere other than that dialog, so the next time it lands on one
+		# it is a new arrival and worth speaking for. See L{_finishSpellCheck}.
+		self._saidCompleteFor = None
 
 		# The F7 spelling dialog. NVDA's own report of the box holding the word says the
 		# label, the word and the spelling at one speed, so it is answered here, before
@@ -3416,6 +3526,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 				nextHandler()
 			# No dialog and no button: Outlook has simply handed the message back.
 			self._finishSpellCheck(onTheOkButton=False)
+			# The body is not the dialog, so nothing is being guarded against a repeat.
+			self._saidCompleteFor = None
 			return
 
 		# Tabbing into the body of a message. NVDA announces the Word editing surface
@@ -3564,18 +3676,31 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			return True
 		return _saysSpellCheckIsComplete(obj)
 
-	def _finishSpellCheck(self, onTheOkButton=True):
+	def _finishSpellCheck(self, obj=None, onTheOkButton=True):
 		"""Say the check is over, once, and stop everything that was following it.
 
 		NVDA announces the OK button a second time of its own accord, and Outlook returns
 		the focus to the message afterwards, which would otherwise be answered with "you
 		are now in the message body". Both are held off for a moment rather than switched
 		off, so nothing can be left silenced.
+
+		Once only. That dialog raises more than one focus event for the same arrival, and
+		each of them is the end of the same check, so the window it was said for is
+		remembered. The memory is of a window rather than of a moment in time, and it is
+		forgotten the instant the focus goes anywhere else, so running a second check
+		straight after the first always says so again.
 		"""
+		window = getattr(obj, "windowHandle", None) if obj is not None else None
+		alreadySaid = window is not None and window == self._saidCompleteFor
+		self._saidCompleteFor = window
 		self._lastSpellCheck = None
 		self._inSpellDialog = False
 		self._suppressBodyUntil = time.monotonic() + 2.0
 		self._suppressSpellOkUntil = time.monotonic() + 2.0
+		if alreadySaid:
+			if _tracing:
+				_traceWrite("SPELLDONE already said for window %s" % window)
+			return
 		log.debug("Mute Browse Mode: the spelling check has finished")
 		with _ownSpeech():
 			speech.speak(_spellCheckCompleteSpeech(onTheOkButton))

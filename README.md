@@ -51,9 +51,15 @@ into the box you type in, instead of reading out the empty page behind it.
 **The F7 spelling checker** says "misspelled", then the word it has stopped on, said and
 then spelled out a fifth slower than usual so you can hear every letter. Your speed goes
 back to normal straight afterwards. When the check is done you hear "Spell check is
-complete. OK button" and nothing else — whether it found mistakes or found none at all.
-The add-on reads the end-of-check window to be sure that is what it is, so every other OK
-button in Outlook is left alone.
+complete. OK button" once and nothing else — whether it found mistakes or found none at
+all. The add-on reads the end-of-check window to be sure that is what it is, so every
+other OK button in Outlook is left alone.
+
+**Checking for new mail** reads the progress bar out in full, all the way to a hundred
+percent. Every message that lands opens a document, and going quiet after a document opens
+is what this add-on is for, so the download used to be read out and then go silent part
+way through. A progress bar is the opposite of noise: something is happening that you
+cannot see and are waiting on.
 
 **Links on their own line**, if you tick that box, so the down arrow reaches every link
 and button in an Outlook email one at a time.
