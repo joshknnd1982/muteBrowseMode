@@ -39,6 +39,7 @@ braille, vision and NVDA's own caches carry on as usual.
 """
 
 import ctypes
+import ctypes.wintypes
 import os
 import re
 import tempfile
@@ -1318,13 +1319,34 @@ def _announceMessageBody():
 
 
 ### The Outlook spelling checker
+#
+# The F7 window in the classic Outlook is not a modern accessibility interface at all.
+# It is an ordinary Win32 dialog put on screen by the Word engine that renders the
+# message, and the box in it that shows the mistake is a small Word editing surface.
+# Word also highlights the mistake in the message itself as the dialog steps through
+# them, so the message's own selection is a second place the word can be read from.
+#
+# NVDA already knows this window: the box has a window class of ``_WwN`` or ``_WwO`` and
+# the control id 18, and NVDA answers those three facts with a class called
+# ``SpellCheckErrorField`` whose ``errorText`` is the mistake and nothing else. The
+# add-on used to look for ``_WwN`` alone and read the box's *selection*, which is why it
+# could come away with nothing at all and then say nothing at all, having already
+# silenced NVDA's own reading of the box. Every one of those places is now asked in turn.
 
-#: The window class Word gives an editing surface it puts inside one of its own
+#: The window classes Word gives an editing surface it puts inside one of its own
 #: dialogs, which NVDA has a class of its own for, ``WordDocument_WwN``. In Outlook the
-#: one the user meets is the box in the F7 spelling dialog.
-_WORD_DIALOG_WINDOW_CLASS = "_WwN"
+#: one the user meets is the box in the F7 spelling dialog. Both classes are here because
+#: NVDA accepts either, and looking for only the first is one of the reasons the box was
+#: never found.
+_WORD_DIALOG_WINDOW_CLASSES = frozenset(("_WwN", "_WwO"))
 
-#: How much slower than usual the word is spelled out. 0.8 is a fifth slower.
+#: The control id Word gives the "Not in Dictionary" box, and the one thing that tells it
+#: apart from the other Word surfaces the dialog is built out of. NVDA uses exactly this
+#: number to decide a window is a spelling error field rather than an ordinary document,
+#: and a window with it is always the right one to ask.
+_SPELL_ERROR_CONTROL_ID = 18
+
+#: How much slower than usual the word is said and spelled out. 0.8 is a fifth slower.
 _SPELL_RATE_MULTIPLIER = 0.8
 
 #: Longer than this and whatever we found is not one misspelled word.
@@ -1360,104 +1382,342 @@ def _looksLikeWord(text):
 	return any(character.isalpha() for character in word)
 
 
-def _outlookSpellCheckField(obj):
-	"""The Word surface belonging to the spelling dialog the focus is in, if it is.
+try:
+	# NVDA declares both of these with the right argument types, so this is its own
+	# binding rather than a second one built beside it.
+	from winBindings.user32 import WNDENUMPROC as _ENUM_WINDOWS_PROC
+	from winBindings.user32 import EnumChildWindows as _enumChildWindows
+except Exception:
+	try:
+		_ENUM_WINDOWS_PROC = ctypes.WINFUNCTYPE(
+			ctypes.wintypes.BOOL,
+			ctypes.wintypes.HWND,
+			ctypes.wintypes.LPARAM,
+		)
+		_enumChildWindows = ctypes.windll.user32.EnumChildWindows
+		_enumChildWindows.restype = ctypes.wintypes.BOOL
+		_enumChildWindows.argtypes = (
+			ctypes.wintypes.HWND,
+			_ENUM_WINDOWS_PROC,
+			ctypes.wintypes.LPARAM,
+		)
+	except Exception:
+		# Without it the spelling box is looked for the way NVDA looks for one, which
+		# finds it in every ordinary case; only a dialog holding more than one Word
+		# surface needs the walk below to tell them apart.
+		_ENUM_WINDOWS_PROC = None
+		_enumChildWindows = None
+		log.debugWarning("Mute Browse Mode: cannot walk child windows", exc_info=True)
 
-	The focus lands on whichever control the dialog starts on, which is not always the
-	box holding the word, so the surface is looked for by window class in the same
-	thread, the way NVDA finds the document behind such a box itself. It only counts
-	when it belongs to the same window as the focus: a Word surface sitting in some
-	dialog elsewhere in Outlook is not the one being looked at.
+#: Nothing sane has this many windows inside it. A ceiling so a walk of the window tree
+#: can never become the slow thing in a focus change.
+_MAX_WINDOWS_WALKED = 400
+
+
+def _childWindows(window):
+	"""Every window inside C{window}, however deeply nested, or an empty list."""
+	found = []
+	if not window or _enumChildWindows is None:
+		return found
+
+	def visit(child, _lParam):
+		found.append(child)
+		return len(found) < _MAX_WINDOWS_WALKED
+
+	try:
+		_enumChildWindows(window, _ENUM_WINDOWS_PROC(visit), 0)
+	except Exception:
+		log.debugWarning("Mute Browse Mode: could not walk the dialog", exc_info=True)
+	return found
+
+
+def _anyWordDialogSurface(obj):
+	"""Any Word dialog surface in the same thread as C{obj}, or 0 for none.
+
+	NVDA's own search, in one pass of native code, and the whole question for every focus
+	change where the spelling window is not open — which is nearly all of them. Only when
+	this says there is a Word dialog somewhere does it become worth looking properly.
+	"""
+	try:
+		import NVDAHelper
+
+		for windowClass in sorted(_WORD_DIALOG_WINDOW_CLASSES):
+			window = NVDAHelper.localLib.findWindowWithClassInThread(
+				obj.windowThreadID,
+				windowClass,
+				True,
+			)
+			if window:
+				return window
+	except Exception:
+		log.debugWarning("Mute Browse Mode: could not look for a Word dialog", exc_info=True)
+	return 0
+
+
+def _spellBoxInside(window):
+	"""The box showing the mistake, somewhere inside C{window}, or 0.
+
+	A Word dialog is built out of several Word surfaces and only one of them shows the
+	mistake, so they are told apart by control id rather than by which turns up first.
+	Any of them is better than none, so an unrecognised one is kept as a spare.
+	"""
+	spare = 0
+	for child in _childWindows(window):
+		try:
+			if winUser.getClassName(child) not in _WORD_DIALOG_WINDOW_CLASSES:
+				continue
+			if winUser.getControlID(child) == _SPELL_ERROR_CONTROL_ID:
+				return child
+		except Exception:
+			continue
+		spare = spare or child
+	return spare
+
+
+def _sameWindowFamily(window, obj):
+	"""Whether C{window} and C{obj} belong to the same family of windows.
+
+	"The same window" is the wrong test for a dialog, because a dialog is a window in its
+	own right rather than a part of the window it belongs to. What the two share is the
+	window that owns them both, which for the spelling dialog is the message being
+	checked.
+	"""
+	try:
+		owner = getattr(winUser, "GA_ROOTOWNER", 3)
+		return winUser.getAncestor(window, owner) == winUser.getAncestor(obj.windowHandle, owner)
+	except Exception:
+		return False
+
+
+def _spellErrorFieldWindow(obj):
+	"""The handle of the box showing the mistake, in the spelling dialog C{obj} is in.
+
+	The dialog is looked for in the window the focus is in, in the window in front, and
+	in the windows either of those owns, and nowhere else: a Word dialog open somewhere
+	else in Outlook is not the one being looked at.
+	"""
+	if _windowClassOf(obj) in _WORD_DIALOG_WINDOW_CLASSES:
+		try:
+			if winUser.getControlID(obj.windowHandle) == _SPELL_ERROR_CONTROL_ID:
+				return obj.windowHandle
+		except Exception:
+			pass
+	surface = _anyWordDialogSurface(obj)
+	if not surface:
+		return 0
+	try:
+		containers = []
+		for container in (_rootWindowOf(obj), winUser.getForegroundWindow()):
+			if container and container not in containers:
+				containers.append(container)
+		for container in containers:
+			window = _spellBoxInside(container)
+			if window:
+				return window
+		# The dialog is not part of either of those, so it is a window of its own. Take
+		# the one NVDA's own search turned up, so long as it belongs to the same family
+		# of windows, and look inside it for the box proper.
+		found = winUser.getAncestor(surface, winUser.GA_ROOT)
+		if found in containers or _sameWindowFamily(surface, obj):
+			return _spellBoxInside(found) or surface
+	except Exception:
+		log.debugWarning("Mute Browse Mode: could not look for the spelling dialog", exc_info=True)
+	return 0
+
+
+def _objectFromWindow(window):
+	"""A fresh NVDA object for C{window}, or C{None}.
+
+	Fresh matters: NVDA caches an object's properties, and the whole point of asking
+	again a moment later is to get an answer that has changed since.
+	"""
+	try:
+		from NVDAObjects.IAccessible import getNVDAObjectFromEvent
+
+		return getNVDAObjectFromEvent(window, winUser.OBJID_CLIENT, 0)
+	except Exception:
+		log.debugWarning("Mute Browse Mode: could not reach the spelling box", exc_info=True)
+		return None
+
+
+def _outlookSpellCheckField(obj):
+	"""The box showing the mistake, in the spelling dialog the focus is in, if it is.
+
+	The focus lands on whichever control the dialog starts on, and moves about as the
+	user works, so the box is looked for rather than assumed. See
+	L{_spellErrorFieldWindow} for how it is picked out.
 	"""
 	if not _isInOutlookWindow(obj):
 		return None
-	if _windowClassOf(obj) == _WORD_DIALOG_WINDOW_CLASS:
-		return obj
-	try:
-		import NVDAHelper
-		import winUser
-		from NVDAObjects.IAccessible import getNVDAObjectFromEvent
-
-		window = NVDAHelper.localLib.findWindowWithClassInThread(
-			obj.windowThreadID,
-			_WORD_DIALOG_WINDOW_CLASS,
-			True,
-		)
-		if not window:
-			return None
-		root = getattr(winUser, "GA_ROOT", 2)
-		if winUser.getAncestor(obj.windowHandle, root) != winUser.getAncestor(window, root):
-			# A Word dialog, but not the one the focus is in.
-			return None
-		return getNVDAObjectFromEvent(window, winUser.OBJID_CLIENT, 0)
-	except Exception:
-		log.debugWarning("Mute Browse Mode: could not look for the spelling dialog", exc_info=True)
+	window = _spellErrorFieldWindow(obj)
+	if not window:
+		if _tracing and _windowClassOf(obj) in _WORD_DIALOG_WINDOW_CLASSES:
+			# The focus is sitting on a Word dialog surface and the box was still not
+			# found, which is the one thing worth knowing if this ever goes quiet again.
+			_traceWrite("SPELL no box found from %s" % _describe(obj))
 		return None
+	if _tracing:
+		try:
+			_traceWrite(
+				"SPELL box=%s class=%s id=%s"
+				% (window, winUser.getClassName(window), winUser.getControlID(window)),
+			)
+		except Exception:
+			_traceWrite("SPELL box=%s" % window)
+	if getattr(obj, "windowHandle", None) == window:
+		return obj
+	return _objectFromWindow(window)
 
 
-def _misspelledWord(field):
-	"""The word the spelling checker is asking about.
-
-	Word selects the error in the message itself as it steps through, and NVDA points
-	the box in the dialog at that same selection, so the selection is the word. The
-	word under the cursor is the fallback for anything that does not work that way.
-	Whatever comes back has to look like a single word, or it is not used at all: the
-	box holds the whole sentence the error is in, and reading that out would be worse
-	than saying nothing.
-	"""
+def _selectionText(obj):
+	"""What is selected in C{obj}, or what the cursor is on if nothing is."""
 	for position, unit in (
 		(textInfos.POSITION_SELECTION, None),
 		(textInfos.POSITION_CARET, textInfos.UNIT_WORD),
 	):
 		try:
-			info = field.makeTextInfo(position)
+			info = obj.makeTextInfo(position)
 			if unit is not None:
 				info.expand(unit)
-			word = (info.text or "").strip().strip(_WORD_EDGE_PUNCTUATION)
+			text = info.text or ""
 		except Exception:
 			continue
+		if text.strip():
+			return text
+	return None
+
+
+def _boldRun(field):
+	"""The bold part of the box, which is how the dialog shows which word it means.
+
+	The box holds the whole sentence the mistake sits in and shows the mistake itself in
+	bold. This is how NVDA reads the word out of older versions of Word, and it works
+	whether or not Word will answer questions about itself.
+	"""
+	from displayModel import EditableTextDisplayModelTextInfo
+
+	info = EditableTextDisplayModelTextInfo(field, textInfos.POSITION_ALL)
+	inBold = False
+	bold = []
+	for item in info.getTextWithFields():
+		if isinstance(item, str):
+			if inBold:
+				bold.append(item)
+		elif getattr(item, "field", None):
+			inBold = item.field.get("bold", False)
+		if not inBold and bold:
+			break
+	return "".join(bold)
+
+
+def _messageSelection(field):
+	"""What Word has selected in the message itself.
+
+	The dialog highlights each mistake in the email as it steps through them, so the
+	message's own selection is the word being asked about. Asked of the message rather
+	than of the dialog, so it is an answer even when the box will not give one.
+	"""
+	import NVDAHelper
+
+	for windowClass in sorted(_OUTLOOK_BODY_WINDOW_CLASSES):
+		window = NVDAHelper.localLib.findWindowWithClassInThread(
+			field.windowThreadID,
+			windowClass,
+			True,
+		)
+		if not window:
+			continue
+		body = _objectFromWindow(window)
+		if body is None:
+			continue
+		text = _selectionText(body)
+		if text:
+			return text
+	return None
+
+
+def _wordSources(field):
+	"""Every way of asking what word the checker has stopped on, best answer first.
+
+	Each is a name for the trace and something to call. They are in this order because
+	the first two are what NVDA itself reads, are the word on its own rather than the
+	sentence around it, and cost nothing; the rest are for a dialog that does not answer
+	the way NVDA expects, and end with asking the email instead of the dialog.
+	"""
+	return (
+		("errorText", lambda: getattr(field, "errorText", None)),
+		("value", lambda: getattr(field, "value", None)),
+		("bold", lambda: _boldRun(field)),
+		("selection", lambda: _selectionText(field)),
+		("message", lambda: _messageSelection(field)),
+	)
+
+
+def _misspelledWord(field):
+	"""The word the spelling checker is asking about, or C{None}.
+
+	Whatever comes back has to look like a single word, or it is not used at all: several
+	of the places asked hold the whole sentence the mistake is in, and reading that out
+	would be worse than saying nothing.
+	"""
+	try:
+		field.invalidateCache()
+	except Exception:
+		pass
+	for name, source in _wordSources(field):
+		try:
+			word = (source() or "").strip().strip(_WORD_EDGE_PUNCTUATION)
+		except Exception:
+			if _tracing:
+				_traceWrite("SPELL %s raised" % name)
+			continue
 		if _looksLikeWord(word):
+			if _tracing:
+				_traceWrite("SPELL %s gave %r" % (name, word))
 			return word
+		if _tracing and word:
+			_traceWrite("SPELL %s gave %r, not one word" % (name, word[:80]))
 	return None
 
 
 def _spellingSpeech(word):
-	"""The label and the word, then the word spelled out a fifth more slowly than usual.
+	""""Misspelled", then the word said and spelled out a fifth more slowly than usual.
 
-	The shape JAWS uses: you are told that this is a word the checker does not know, you
-	are told which word, and then you are given it letter by letter slowly enough to
-	take it in.
+	The shape JAWS uses: you are told that this is a word the checker does not know, and
+	then you are given it, twice — as a word and letter by letter — slowly enough to take
+	in. Only the word slows down; the label in front of it is said at the usual speed,
+	because it is the same label every time and is not the part to listen to.
 
 	The slower rate belongs to this one announcement rather than to the synthesiser, so
-	it cannot be left behind anywhere else, not even if the spelling is interrupted half
-	way through.
+	the speed goes back to normal straight afterwards and cannot be left behind anywhere
+	else, not even if the spelling is interrupted half way through.
 	"""
-	sequence = [
-		# Translators: Said in the Outlook spelling window, in front of the word the
-		# checker has stopped on.
-		_("Not in Dictionary:"),
-		word,
-	]
-	getSpelling = getattr(speech, "getSpellingSpeech", None)
-	if getSpelling is None:
-		return sequence
-	spelled = list(sequence)
+	# Translators: Said in the Outlook spelling window, in front of the word the checker
+	# has stopped on.
+	label = _("misspelled")
+	sequence = [label, word]
+	spoken = [label]
 	try:
 		if _EndUtteranceCommand is not None:
-			spelled.append(_EndUtteranceCommand())
+			spoken.append(_EndUtteranceCommand())
 		if _RateCommand is not None:
-			spelled.append(_RateCommand(multiplier=_SPELL_RATE_MULTIPLIER))
-		spelled.extend(getSpelling(word))
+			spoken.append(_RateCommand(multiplier=_SPELL_RATE_MULTIPLIER))
+		spoken.append(word)
+		getSpelling = getattr(speech, "getSpellingSpeech", None)
+		if getSpelling is not None:
+			if _EndUtteranceCommand is not None:
+				spoken.append(_EndUtteranceCommand())
+			spoken.extend(getSpelling(word))
 		if _RateCommand is not None:
 			# Back to the rate the user chose. The synthesiser is never reconfigured, so
 			# this cannot escape the one announcement even if it is interrupted.
-			spelled.append(_RateCommand())
+			spoken.append(_RateCommand())
 	except Exception:
-		# Say the word even if it cannot be spelled out. Half an announcement is worth
-		# having; the dialog arriving in silence is not.
+		# Say the word even if it cannot be spelled out or slowed down. Half an
+		# announcement is worth having; the dialog arriving in silence is not.
 		log.debugWarning("Mute Browse Mode: could not spell the word out", exc_info=True)
 		return sequence
-	return spelled
+	return spoken
 
 
 def _announceMisspelledWord(word):
@@ -2904,11 +3164,15 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 					getattr(ti, "passThrough", "-"),
 				),
 			)
-		# The F7 spelling dialog. NVDA's own report of the box holding the word is the
-		# whole sentence the error sits in, so it is answered here, before nextHandler,
-		# rather than added to afterwards. Everything else in the dialog — the
-		# suggestions, the buttons — is left to NVDA to report as usual, so tabbing
+		# The F7 spelling dialog. NVDA's own report of the box holding the word says the
+		# label, the word and the spelling at one speed, so it is answered here, before
+		# nextHandler, rather than added to afterwards. Everything else in the dialog —
+		# the suggestions, the buttons — is left to NVDA to report as usual, so tabbing
 		# around it works normally.
+		#
+		# The box raises a focus event every time its word changes rather than a value
+		# change, which is what carries the dialog from one mistake to the next: each new
+		# word arrives here as if the user had just landed on the box.
 		spellField = _outlookSpellCheckField(obj)
 		if spellField is not None and not self._isSpellCheckOk(obj):
 			if not self._inSpellDialog:
@@ -2921,7 +3185,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			word = _misspelledWord(spellField)
 			seen = (getattr(spellField, "windowHandle", None), word) if word is not None else None
 			isNewWord = seen is not None and seen != self._lastSpellCheck
-			if isNewWord or _windowClassOf(obj) == _WORD_DIALOG_WINDOW_CLASS:
+			onTheBox = _windowClassOf(obj) in _WORD_DIALOG_WINDOW_CLASSES
+			if isNewWord or onTheBox:
+				# Silencing NVDA is only ever safe where there is something to say
+				# instead. On the box there is: if no word can be worked out at all, the
+				# looks below end by reading the box out the way NVDA would have.
 				with _hardMute():
 					nextHandler()
 			else:
@@ -2930,12 +3198,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 				self._lastSpellCheck = seen
 				log.debug("Mute Browse Mode: spelling checker is asking about %r" % word)
 				_announceMisspelledWord(word)
-			elif word is None:
+			elif word is None and onTheBox:
 				# The dialog is on screen before Word has picked the error out in the
 				# message, so at the moment it takes the focus there is nothing to read
 				# yet. That is what left the first word of a check announced as nothing
 				# at all. Look again in a moment rather than giving up on it.
-				self._lookAgainForTheWord(spellField, 0)
+				self._lookAgainForTheWord(getattr(spellField, "windowHandle", None), 0)
 			return
 		self._inSpellDialog = False
 
@@ -3005,31 +3273,36 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		self._reportMessageBody(obj)
 		self._reportMisspelledWord(obj)
 
-	def _lookAgainForTheWord(self, field, attempt):
+	def _lookAgainForTheWord(self, window, attempt):
 		"""Ask the spelling dialog again for the word it is asking about.
 
 		The dialog takes the focus before Word has selected the error in the message, so
 		the word cannot always be read at the moment it arrives. Each look is scheduled
 		rather than waited for, so nothing is ever held up, and they stop as soon as the
 		focus leaves the dialog.
-		"""
-		if attempt >= len(_SPELL_RETRY_DELAYS):
-			return
-		core.callLater(_SPELL_RETRY_DELAYS[attempt], self._retryTheWord, field, attempt)
 
-	def _retryTheWord(self, field, attempt):
+		The box is remembered as a window rather than as an object, because NVDA keeps an
+		object's answers once it has given them, and the whole point of asking again is to
+		get an answer that has changed since.
+		"""
+		if not window or attempt >= len(_SPELL_RETRY_DELAYS):
+			return
+		core.callLater(_SPELL_RETRY_DELAYS[attempt], self._retryTheWord, window, attempt)
+
+	def _retryTheWord(self, window, attempt):
 		"""One of those later looks. See L{_lookAgainForTheWord}."""
 		try:
-			if not self._stillInSpellDialog(field):
+			if not self._stillInSpellDialog(window):
 				return
-			word = _misspelledWord(field)
+			field = _objectFromWindow(window)
+			word = _misspelledWord(field) if field is not None else None
 			if word is None:
 				if attempt + 1 < len(_SPELL_RETRY_DELAYS):
-					self._lookAgainForTheWord(field, attempt + 1)
+					self._lookAgainForTheWord(window, attempt + 1)
 				else:
-					self._sayTheBoxInstead(field)
+					self._sayTheBoxInstead()
 				return
-			seen = (getattr(field, "windowHandle", None), word)
+			seen = (window, word)
 			if seen == self._lastSpellCheck:
 				return
 			self._lastSpellCheck = seen
@@ -3038,8 +3311,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		except Exception:
 			log.error("Mute Browse Mode: could not look again for the word", exc_info=True)
 
-	def _stillInSpellDialog(self, field):
-		"""Whether the focus is still in the spelling dialog C{field} belongs to.
+	def _stillInSpellDialog(self, window):
+		"""Whether the focus is still in the spelling dialog the box C{window} is in.
 
 		A later look must never speak into a window the user has already moved on to.
 		"""
@@ -3050,9 +3323,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		current = _outlookSpellCheckField(focus)
 		if current is None:
 			return False
-		return getattr(current, "windowHandle", None) == getattr(field, "windowHandle", None)
+		return getattr(current, "windowHandle", None) == window
 
-	def _sayTheBoxInstead(self, field):
+	def _sayTheBoxInstead(self):
 		"""Say what NVDA would have said, when no word could be worked out at all.
 
 		Only reached where the box holding the word was silenced and none of the later
@@ -3064,7 +3337,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			focus = api.getFocusObject()
 		except Exception:
 			return
-		if _windowClassOf(focus) != _WORD_DIALOG_WINDOW_CLASS:
+		if _windowClassOf(focus) not in _WORD_DIALOG_WINDOW_CLASSES:
 			# Something else in the dialog has the focus, and NVDA has already reported
 			# it in the ordinary way.
 			return
@@ -3125,8 +3398,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		"""Report each misspelling, and report completion when the dialog reaches OK.
 
 		The spelling dialog is a Word dialog embedded in Outlook. While it is asking
-		about a word, announce ``Not in Dictionary: <word>``. When the checker finishes,
-		focus lands on its OK button; that transition is the reliable completion point.
+		about a word, announce ``misspelled <word>``. When the checker finishes, focus
+		lands on its OK button; that transition is the reliable completion point.
 		"""
 		try:
 			field = _outlookSpellCheckField(obj)

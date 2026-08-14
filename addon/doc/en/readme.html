@@ -178,12 +178,14 @@ type in, is left alone.</p>
 <p>Press F7 to check your spelling. When the checker stops on a word you hear:</p>
 
 <blockquote>
-<p>Not in Dictionary: hte</p>
+<p>misspelled, hte, h t e</p>
 </blockquote>
 
-<p>and then the word spelled out letter by letter, a little slower than usual so you can
-hear each one. Your speed goes back to normal straight afterwards, and nothing outside
-the spelling window is affected.</p>
+<p>The word "misspelled" comes at your usual speed, because it is the same word every
+time and is not the part to listen to. Then the word itself is said, and then spelled out
+letter by letter, both a fifth slower than usual so you can hear every letter. Your speed
+goes back to normal straight afterwards, and nothing outside the spelling window is
+affected.</p>
 
 <p>Moving on to the next mistake tells you that one. Moving around inside the window
 reads the buttons and the list of suggestions as usual, and does not say the same word
@@ -278,6 +280,21 @@ records every key you press, where you were when you pressed it, and everything 
 says. Delete the <code>.on</code> file and restart NVDA to switch it off again.</p>
 
 <h2>What has changed</h2>
+
+<h3>3.1</h3>
+<ul>
+<li>Fixed the spelling checker saying nothing at all. The add-on was looking for the box
+that shows the mistake by one window class when Word uses either of two, and was reading
+the mistake out of the box's selection rather than asking the box what the mistake is. So
+it found nothing, having already silenced NVDA's own reading of the box, and you got
+silence. It now asks in five different ways, starting with the one NVDA itself uses, and
+falls through to what Word has highlighted in your email if the box will not answer.</li>
+<li>The announcement is now "misspelled", then the word said and spelled out a fifth
+slower than usual, with your speed back to normal straight afterwards. It used to say
+"Not in Dictionary" and the word at full speed and only slow down for the letters.</li>
+<li>NVDA is now only silenced where there is something to say instead, so a spelling
+window the add-on cannot make sense of is read out the way it always was.</li>
+</ul>
 
 <h3>3.0.1</h3>
 <ul>

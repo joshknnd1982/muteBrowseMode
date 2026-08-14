@@ -48,8 +48,9 @@ subject.
 **Writing an email** says "You are now in the message body, type a message." when you tab
 into the box you type in, instead of reading out the empty page behind it.
 
-**The F7 spelling checker** says "Not in Dictionary", then the word it has stopped on,
-then spells it out a little slower than usual. When it is done you hear "Spell check is
+**The F7 spelling checker** says "misspelled", then the word it has stopped on, said and
+then spelled out a fifth slower than usual so you can hear every letter. Your speed goes
+back to normal straight afterwards. When the check is done you hear "Spell check is
 complete. OK button" and nothing else.
 
 **Links on their own line**, if you tick that box, so the down arrow reaches every link
