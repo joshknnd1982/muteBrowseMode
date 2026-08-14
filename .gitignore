@@ -1,7 +1,3 @@
 __pycache__/
 *.py[cod]
 *.nvda-addon
-
-# The flat 2.6.9/2.7.0 copy this folder held before the 3.0 merge, kept as a
-# safety net. Everything in it is merged into the history above.
-_old-2.7.0-before-merge/
