@@ -202,7 +202,15 @@ A word now has to have letters in it, and punctuation stuck to the front or the 
 word is left off.</p>
 
 <p>When the check is done you hear "Spell check is complete. OK button", and nothing
-else.</p>
+else. That is the little window with one OK button in it that comes up at the end, and
+you hear it whether the checker found mistakes or found none at all — pressing F7 on an
+email with nothing wrong with it used to say only "OK button", which told you nothing
+about what had just happened.</p>
+
+<p>The add-on works out that this is the end-of-check window by reading it, rather than
+by assuming that any OK button in Outlook is this one. The window has to say both that it
+is about spelling and that something has finished before the add-on will speak for it.
+Every other OK button in Outlook is left exactly as it was.</p>
 
 <h2>Swapping between windows</h2>
 
@@ -280,6 +288,21 @@ records every key you press, where you were when you pressed it, and everything 
 says. Delete the <code>.on</code> file and restart NVDA to switch it off again.</p>
 
 <h2>What has changed</h2>
+
+<h3>3.2</h3>
+<ul>
+<li>Fixed the end of a spelling check saying only "OK button". Pressing F7 on an email
+with nothing wrong with it went straight to that little window with one OK button in it,
+and all you heard was the button — no word about the check having run at all. You now
+hear "Spell check is complete. OK button".</li>
+<li>The same thing happened at the end of a check that <em>had</em> found mistakes,
+because that window is a window in its own right rather than part of the spelling window,
+so nothing connected the two.</li>
+<li>The add-on now works out that this is the end-of-check window by reading what it says,
+rather than by assuming any OK button in Outlook is that one. It has to say both that it
+is about spelling and that something has finished. Every other OK button in Outlook is
+untouched.</li>
+</ul>
 
 <h3>3.1</h3>
 <ul>

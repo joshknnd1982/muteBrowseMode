@@ -1730,6 +1730,198 @@ def _announceMisspelledWord(word):
 		speech.speak(sequence)
 
 
+### The dialog that says the check has finished
+#
+# A check ends with a small dialog of its own holding a single OK button, and it comes up
+# whether or not anything was found. A check that found nothing at all puts it straight on
+# screen without a word ever having been said, so there is nothing behind it to match it
+# against, and matching it against the dialog the words were asked in does not work either
+# — it is a window in its own right, so it does not share one with anything. What is left
+# is what it says, and it says so plainly: "The spelling and grammar check is complete."
+#
+# The dialog's own words are read rather than assumed, and two things have to be in them:
+# something about spelling, and something about being finished. Either on its own is not
+# enough. "Text marked with do not check spelling or grammar was skipped" is about
+# spelling and is not this dialog; plenty of Outlook dialogs say something is complete.
+
+#: The names the OK button goes by. The ampersand is the underline under the letter you
+#: can press with alt, which some versions leave in the name.
+_OK_BUTTON_NAMES = frozenset(("ok", "&ok"))
+
+#: Roles a dialog has. The walk up from the button stops at the first of these, and gives
+#: up at anything that is a whole window, so that failing to find the dialog can never
+#: turn into reading the whole of Outlook.
+_DIALOG_ROLES = _members(controlTypes.Role, ("DIALOG", "ALERT", "PROPERTYPAGE", "OPTIONPANE"))
+_NOT_A_DIALOG_ROLES = _members(controlTypes.Role, ("APPLICATION", "FRAME", "DESKTOP"))
+
+#: Window classes that are a dialog whatever role NVDA gives them: the standard Windows
+#: one, and the one Office uses for its own.
+_DIALOG_WINDOW_CLASS = "#32770"
+_OFFICE_DIALOG_WINDOW_PREFIX = "bosa_sdm"
+
+#: How far up from the button to look for the dialog, and how much of the dialog to read
+#: once it is found. A message box is a title, a line of text and a button or two, so
+#: these are generous; they are here so that an unexpected shape cannot turn a focus
+#: change into a walk of something enormous.
+_DIALOG_WALK_LIMIT = 6
+_DIALOG_SCAN_DEPTH = 4
+_DIALOG_SCAN_LIMIT = 60
+
+
+def _wordList(english, translated):
+	"""The English words and the translated ones, since the dialog is not NVDA's.
+
+	NVDA may be running in one language and Outlook in another, so the English words are
+	always looked for as well as the ones for the user's language.
+	"""
+	words = set()
+	for source in (english, translated):
+		for word in (source or "").split(","):
+			word = word.strip().lower()
+			if word:
+				words.add(word)
+	return frozenset(words)
+
+
+#: Translators: Parts of words, separated by commas and in lower case, that say a message
+#: is about spelling. They are matched against what the Outlook dialog announcing the end
+#: of a spelling check says, so they should be the shortest stem that cannot be mistaken
+#: for something else: "spell" rather than "spelling", so that "spellcheck" matches too.
+_SPELLING_WORDS = _wordList("spell,grammar,proofing", _("spell,grammar,proofing"))
+
+#: Translators: Parts of words, separated by commas and in lower case, that say something
+#: has finished. Matched against the same dialog as the list above, and both lists have to
+#: match before the add-on will say a spelling check is complete.
+_COMPLETION_WORDS = _wordList("complete,finish,done", _("complete,finish,done"))
+
+
+def _isOkButton(obj):
+	"""Whether C{obj} is an OK button in Outlook."""
+	if not _isInOutlookWindow(obj):
+		return False
+	try:
+		if getattr(obj, "role", None) != controlTypes.Role.BUTTON:
+			return False
+		return (getattr(obj, "name", "") or "").strip().lower() in _OK_BUTTON_NAMES
+	except Exception:
+		return False
+
+
+def _looksLikeADialog(obj):
+	"""Whether C{obj} is the dialog itself rather than something on the way to it."""
+	if getattr(obj, "role", None) in _DIALOG_ROLES:
+		return True
+	windowClass = _windowClassOf(obj)
+	return windowClass == _DIALOG_WINDOW_CLASS or windowClass.lower().startswith(
+		_OFFICE_DIALOG_WINDOW_PREFIX,
+	)
+
+
+def _dialogAbove(obj):
+	"""The dialog C{obj} sits in, or C{None} if it is not in one.
+
+	C{None} matters as much as an answer here. The whole point of reading a dialog is to
+	find out what it is, so reading the wrong thing is worse than reading nothing: the
+	walk gives up rather than settling for whatever it has reached.
+	"""
+	current = obj
+	for _step in range(_DIALOG_WALK_LIMIT):
+		try:
+			current = current.parent
+		except Exception:
+			return None
+		if current is None:
+			return None
+		if _looksLikeADialog(current):
+			return current
+		if getattr(current, "role", None) in _NOT_A_DIALOG_ROLES:
+			# Out of the dialog and into the application without having found one.
+			return None
+	return None
+
+
+def _dialogText(dialog):
+	"""Everything C{dialog} says, in one lower case string, or C{None}.
+
+	A message box keeps its message in a piece of static text inside it rather than in
+	its own name, so the children are read as well as the dialog. Bounded twice over, by
+	how deep it goes and by how many objects it holds, because this runs on a focus
+	change.
+
+	Running past that bound is an answer in itself, and the answer is C{None}. The dialog
+	being looked for is a message box: a title, a line of text and a button. Anything with
+	more in it than that is something else — an Outlook message is itself a dialog — and
+	reading a whole message and finding the words "spelling" and "complete" somewhere in
+	the middle of it is exactly the mistake this is here to avoid.
+	"""
+	texts = []
+	read = 0
+	level = [dialog]
+	for _depth in range(_DIALOG_SCAN_DEPTH):
+		below = []
+		for item in level:
+			read += 1
+			if read > _DIALOG_SCAN_LIMIT:
+				return None
+			for name in ("name", "value", "description"):
+				try:
+					text = getattr(item, name, None)
+				except Exception:
+					continue
+				if isinstance(text, str) and text.strip():
+					texts.append(text)
+			try:
+				below.extend(item.children or ())
+			except Exception:
+				pass
+			if len(below) > _DIALOG_SCAN_LIMIT:
+				return None
+		if not below:
+			break
+		level = below
+	return " ".join(texts).lower()
+
+
+def _saysSpellCheckIsComplete(obj):
+	"""Whether the dialog C{obj} is in says a spelling check has finished."""
+	dialog = _dialogAbove(obj)
+	if dialog is None:
+		return False
+	try:
+		text = _dialogText(dialog)
+	except Exception:
+		log.debugWarning("Mute Browse Mode: could not read the dialog", exc_info=True)
+		return False
+	if not text:
+		return False
+	aboutSpelling = any(word in text for word in _SPELLING_WORDS)
+	hasFinished = any(word in text for word in _COMPLETION_WORDS)
+	if _tracing:
+		_traceWrite(
+			"SPELLDONE spelling=%s finished=%s text=%r"
+			% (aboutSpelling, hasFinished, text[:160]),
+		)
+	return aboutSpelling and hasFinished
+
+
+def _spellCheckCompleteSpeech(onTheOkButton):
+	"""What to say when a check ends.
+
+	The button is only named where the focus is actually on it. A check can also end with
+	Outlook simply handing the message back, and naming a button that is not there would
+	send the user looking for one.
+	"""
+	sequence = [
+		# Translators: Said in place of NVDA's own report when the Outlook spelling
+		# checker has finished and its last dialog, holding only an OK button, comes up.
+		_("Spell check is complete."),
+	]
+	if onTheOkButton:
+		# Translators: The button on that dialog, named after the sentence above it.
+		sequence.append(_("OK button"))
+	return sequence
+
+
 #: What NVDA calls the state a disabled control is in, lower case, or C{None} where this
 #: NVDA does not name its states this way.
 try:
@@ -3164,6 +3356,15 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 					getattr(ti, "passThrough", "-"),
 				),
 			)
+		# The dialog saying the check has finished, which is asked about before the
+		# checker itself: it comes up whether or not anything was found, so a check that
+		# found nothing at all arrives here with no word ever having been said.
+		if self._isSpellCheckComplete(obj):
+			with _hardMute():
+				nextHandler()
+			self._finishSpellCheck()
+			return
+
 		# The F7 spelling dialog. NVDA's own report of the box holding the word says the
 		# label, the word and the spelling at one speed, so it is answered here, before
 		# nextHandler, rather than added to afterwards. Everything else in the dialog —
@@ -3174,7 +3375,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		# change, which is what carries the dialog from one mistake to the next: each new
 		# word arrives here as if the user had just landed on the box.
 		spellField = _outlookSpellCheckField(obj)
-		if spellField is not None and not self._isSpellCheckOk(obj):
+		if spellField is not None:
 			if not self._inSpellDialog:
 				# A check that has only just started. What the last one finished on must
 				# not be allowed to count as "already said" against the first word of
@@ -3213,24 +3414,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		if self._lastSpellCheck is not None and _isOutlookMessageBody(obj):
 			with _hardMute():
 				nextHandler()
-			self._lastSpellCheck = None
-			self._suppressBodyUntil = time.monotonic() + 2.0
-			self._suppressSpellOkUntil = time.monotonic() + 2.0
-			with _ownSpeech():
-				speech.speak([_("Spell check is complete."), _("OK button")])
-			return
-
-		# The spelling dialog's OK button must not be spoken by NVDA itself.
-		# We replace that default focus speech with the JAWS-style completion
-		# announcement below. This has to happen before nextHandler().
-		if self._isSpellCheckOk(obj):
-			with _hardMute():
-				nextHandler()
-			self._lastSpellCheck = None
-			self._suppressBodyUntil = time.monotonic() + 2.0
-			self._suppressSpellOkUntil = time.monotonic() + 2.0
-			with _ownSpeech():
-				speech.speak([_("Spell check is complete."), _("OK button")])
+			# No dialog and no button: Outlook has simply handed the message back.
+			self._finishSpellCheck(onTheOkButton=False)
 			return
 
 		# Tabbing into the body of a message. NVDA announces the Word editing surface
@@ -3267,11 +3452,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 					nextHandler()
 				_speakBriefFocus(sequence)
 				self._reportMessageBody(obj)
-				self._reportMisspelledWord(obj)
 				return
 		nextHandler()
 		self._reportMessageBody(obj)
-		self._reportMisspelledWord(obj)
 
 	def _lookAgainForTheWord(self, window, attempt):
 		"""Ask the spelling dialog again for the word it is asking about.
@@ -3346,15 +3529,15 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			speech.speakObject(focus, reason=controlTypes.OutputReason.FOCUS)
 
 	def _isSpellCheckOk(self, obj):
-		"""Whether C{obj} is the spelling dialog's OK button for the current check."""
-		if self._lastSpellCheck is None or not _isInOutlookWindow(obj):
+		"""Whether C{obj} is the OK button of the dialog the words were asked in.
+
+		Only an answer where a check was being followed, and only where the button
+		belongs to the same window the last word was asked about. Both of those are why
+		it cannot answer for a check that found nothing at all.
+		"""
+		if self._lastSpellCheck is None:
 			return False
 		try:
-			if getattr(obj, "role", None) != controlTypes.Role.BUTTON:
-				return False
-			name = (getattr(obj, "name", "") or "").strip().lower()
-			if name not in ("ok", "&ok"):
-				return False
 			lastWindow = self._lastSpellCheck[0]
 			window = getattr(obj, "windowHandle", None)
 			return (
@@ -3364,6 +3547,38 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			)
 		except Exception:
 			return False
+
+	def _isSpellCheckComplete(self, obj):
+		"""Whether C{obj} is the OK button of the dialog saying the check has finished.
+
+		Asked two ways, because there are two ways of arriving at this dialog. A check
+		that found something ends where the words were being asked, so the button belongs
+		to a window the add-on already knows about. A check that found nothing at all
+		never said a word, so there is nothing to match it against and the only thing that
+		can identify it is what it says — which is also the surer of the two, and the
+		reason the dialog is read rather than assumed.
+		"""
+		if not _isOkButton(obj):
+			return False
+		if self._isSpellCheckOk(obj):
+			return True
+		return _saysSpellCheckIsComplete(obj)
+
+	def _finishSpellCheck(self, onTheOkButton=True):
+		"""Say the check is over, once, and stop everything that was following it.
+
+		NVDA announces the OK button a second time of its own accord, and Outlook returns
+		the focus to the message afterwards, which would otherwise be answered with "you
+		are now in the message body". Both are held off for a moment rather than switched
+		off, so nothing can be left silenced.
+		"""
+		self._lastSpellCheck = None
+		self._inSpellDialog = False
+		self._suppressBodyUntil = time.monotonic() + 2.0
+		self._suppressSpellOkUntil = time.monotonic() + 2.0
+		log.debug("Mute Browse Mode: the spelling check has finished")
+		with _ownSpeech():
+			speech.speak(_spellCheckCompleteSpeech(onTheOkButton))
 
 	def _reportMessageBody(self, obj):
 		"""Say when the focus has reached an Outlook message body.
@@ -3393,52 +3608,6 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			_announceMessageBody()
 		except Exception:
 			log.error("Mute Browse Mode: could not announce the message body", exc_info=True)
-
-	def _reportMisspelledWord(self, obj):
-		"""Report each misspelling, and report completion when the dialog reaches OK.
-
-		The spelling dialog is a Word dialog embedded in Outlook. While it is asking
-		about a word, announce ``misspelled <word>``. When the checker finishes, focus
-		lands on its OK button; that transition is the reliable completion point.
-		"""
-		try:
-			field = _outlookSpellCheckField(obj)
-			if field is not None:
-				word = _misspelledWord(field)
-				if word is None:
-					return
-				seen = (getattr(field, "windowHandle", None), word)
-				if seen == self._lastSpellCheck:
-					return
-				self._lastSpellCheck = seen
-				log.debug("Mute Browse Mode: spelling checker is asking about %r" % word)
-				_announceMisspelledWord(word)
-				return
-
-			# Once the last misspelling has been handled, Outlook's spelling dialog
-			# moves focus to its OK button. Only treat an OK button in the same Word
-			# dialog as completion, so ordinary Outlook OK buttons are untouched.
-			if self._lastSpellCheck is not None and _isInOutlookWindow(obj):
-				role = getattr(obj, "role", None)
-				name = (getattr(obj, "name", "") or "").strip().lower()
-				if role == controlTypes.Role.BUTTON and name in ("ok", "&ok"):
-					lastWindow = self._lastSpellCheck[0]
-					try:
-						sameWindow = (
-							getattr(obj, "windowHandle", None) == lastWindow
-							or winUser.getAncestor(obj.windowHandle, winUser.GA_ROOT)
-							== winUser.getAncestor(lastWindow, winUser.GA_ROOT)
-						)
-					except Exception:
-						sameWindow = False
-					if sameWindow:
-						self._lastSpellCheck = None
-						self._suppressBodyUntil = time.monotonic() + 2.0
-						self._suppressSpellOkUntil = time.monotonic() + 2.0
-						with _ownSpeech():
-							speech.speak([_("Spell check is complete."), _("OK button")])
-		except Exception:
-			log.error("Mute Browse Mode: could not announce the spelling state", exc_info=True)
 
 	def terminate(self):
 		_cancelSummary()
